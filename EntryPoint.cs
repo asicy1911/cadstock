@@ -8,6 +8,7 @@ namespace cadstock
     public class EntryPoint : IExtensionApplication
     {
         public void Initialize() { }
+
         public void Terminate()
         {
             PaletteHost.DisposePalette();
