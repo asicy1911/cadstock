@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,189 +17,299 @@ namespace cadstockv2
         public static StockQuoteService Instance { get; } = new StockQuoteService();
 
         private readonly object _lock = new object();
-        private readonly List<string> _symbols = new List<string>
-        {
-            // 默认关注（你可改）
-            "s_sh600519",
-            "s_sh601318",
-            "s_sh600036",
-            "s_sz000001",
-            "s_sz300750",
-        };
-
-        private readonly List<Quote> _snapshot = new List<Quote>();
-        private DateTime _lastUpdate = DateTime.MinValue;
+        private readonly List<string> _symbols = new List<string>(); // "600000" / "000001" / etc
+        private readonly Dictionary<string, StockQuote> _latest = new Dictionary<string, StockQuote>(StringComparer.OrdinalIgnoreCase);
 
         private Timer _timer;
-        private readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
-        private readonly SemaphoreSlim _refreshGate = new SemaphoreSlim(1, 1);
+        private HttpClient _http;
 
-        private volatile bool _started;
+        public DateTime? LastUpdate { get; private set; }
+        public string LastError { get; private set; }
 
-        private StockQuoteService() { }
+        public event Action DataUpdated;
+
+        private StockQuoteService()
+        {
+            // ✅ 强制开启 TLS1.2（很多 HTTPS 行情接口都要求）
+            try
+            {
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            }
+            catch { }
+        }
 
         public void Start()
         {
-            if (_started) return;
-            _started = true;
+            lock (_lock)
+            {
+                if (_http == null)
+                {
+                    var handler = new HttpClientHandler
+                    {
+                        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+                    };
 
-            _timer?.Dispose();
-            _timer = new Timer(async _ => await SafeRefreshAsync().ConfigureAwait(false), null, 0, 5000);
+                    _http = new HttpClient(handler)
+                    {
+                        Timeout = TimeSpan.FromSeconds(6)
+                    };
+                    _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) cadstockv2");
+                }
+
+                if (_timer == null)
+                {
+                    // 立即跑一次，然后每 10 秒刷新（你也可以改成 5 秒）
+                    _timer = new Timer(async _ => await TickSafeAsync().ConfigureAwait(false), null, 0, 10_000);
+                }
+
+                if (_symbols.Count == 0)
+                {
+                    LoadSymbols();
+                }
+            }
         }
 
         public void Stop()
         {
-            _started = false;
-            _timer?.Dispose();
-            _timer = null;
+            lock (_lock)
+            {
+                _timer?.Dispose();
+                _timer = null;
+                _http?.Dispose();
+                _http = null;
+            }
+        }
+
+        /// <summary>你下拉/面板需要的列表</summary>
+        public List<StockQuote> GetSnapshot()
+        {
+            lock (_lock)
+            {
+                return _latest.Values
+                    .OrderBy(q => q.Symbol)
+                    .ToList();
+            }
         }
 
         public void SetSymbols(IEnumerable<string> symbols)
         {
-            if (symbols == null) return;
             lock (_lock)
             {
                 _symbols.Clear();
-                _symbols.AddRange(symbols.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct());
+                _symbols.AddRange(symbols.Where(s => !string.IsNullOrWhiteSpace(s)).Select(NormalizeSymbol).Distinct());
+                SaveSymbols();
             }
-            ForceRefresh();
         }
 
-        public void ForceRefresh()
+        private async Task TickSafeAsync()
         {
-            _ = SafeRefreshAsync();
+            try
+            {
+                await TickAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                lock (_lock)
+                {
+                    LastError = ex.GetType().Name + ": " + ex.Message;
+                }
+                FireUpdated();
+            }
         }
 
-        public List<Quote> GetSnapshot(out DateTime lastUpdate)
+        private async Task TickAsync()
         {
+            List<string> list;
             lock (_lock)
             {
-                lastUpdate = _lastUpdate;
-                return _snapshot.Select(x => x.Clone()).ToList();
+                list = _symbols.ToList();
             }
+
+            if (list.Count == 0)
+            {
+                lock (_lock)
+                {
+                    LastError = "股票列表为空（symbols=0）。请先设置股票代码。";
+                    LastUpdate = null;
+                }
+                FireUpdated();
+                return;
+            }
+
+            // 并发拉取（别太大，避免被限流）
+            var tasks = list.Take(30).Select(s => FetchOneAsync(s)).ToArray();
+            var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+            int ok = 0;
+            lock (_lock)
+            {
+                foreach (var q in results)
+                {
+                    if (q == null) continue;
+                    _latest[q.Symbol] = q;
+                    ok++;
+                }
+
+                if (ok > 0)
+                {
+                    LastUpdate = DateTime.Now;
+                    LastError = null;
+                }
+                else
+                {
+                    // 没有任何成功时，保留 LastError（FetchOneAsync 里会写）
+                    if (string.IsNullOrWhiteSpace(LastError))
+                        LastError = "全部请求失败/解析失败（ok=0）";
+                    // 不更新 LastUpdate，让你看到“更新时间无”
+                    LastUpdate = null;
+                }
+            }
+
+            FireUpdated();
         }
 
-        private async Task SafeRefreshAsync()
+        private async Task<StockQuote> FetchOneAsync(string symbol)
         {
-            if (!_started) return;
-            if (!await _refreshGate.WaitAsync(0).ConfigureAwait(false)) return;
+            symbol = NormalizeSymbol(symbol);
+            var secid = ToSecId(symbol); // 6开头 => 1.xxxxxx  否则 0.xxxxxx :contentReference[oaicite:1]{index=1}
+            var url = "https://push2.eastmoney.com/api/qt/stock/get?secid=" + secid + "&fields=f58,f43,f60";
 
             try
             {
-                await RefreshAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                // 不抛给 CAD，静默失败即可（菜单会显示暂无数据或旧数据）
-            }
-            finally
-            {
-                _refreshGate.Release();
-            }
-        }
-
-        private async Task RefreshAsync()
-        {
-            List<string> syms;
-            lock (_lock) syms = _symbols.ToList();
-            if (syms.Count == 0) return;
-
-            // Sina 行情：返回 GBK，形如 var hq_str_s_sh600519="..."
-            var url = "https://hq.sinajs.cn/list=" + string.Join(",", syms);
-
-            byte[] bytes = await _http.GetByteArrayAsync(url).ConfigureAwait(false);
-            var text = Encoding.GetEncoding("GBK").GetString(bytes);
-
-            var parsed = QuoteParser.ParseSinaMini(text, syms);
-
-            lock (_lock)
-            {
-                _snapshot.Clear();
-                _snapshot.AddRange(parsed);
-                _lastUpdate = DateTime.Now;
-            }
-
-            // 通知面板刷新
-            PaletteHost.NotifyQuotesUpdated();
-        }
-    }
-
-    internal sealed class Quote
-    {
-        public string Symbol { get; set; }          // s_sh600519
-        public string SymbolShort { get; set; }     // 600519
-        public string Name { get; set; }            // 贵州茅台
-        public decimal Price { get; set; }          // 当前价
-        public decimal ChangePercent { get; set; }  // 涨跌幅（用于颜色，不展示列）
-
-        public Quote Clone() => new Quote
-        {
-            Symbol = Symbol,
-            SymbolShort = SymbolShort,
-            Name = Name,
-            Price = Price,
-            ChangePercent = ChangePercent
-        };
-    }
-
-    internal static class QuoteParser
-    {
-        public static List<Quote> ParseSinaMini(string text, List<string> symbols)
-        {
-            // s_ 开头的简版字段：name,price,chg,chgPercent,volume,amount
-            // 例：var hq_str_s_sh600519="贵州茅台,1600.00,5.00,0.31,12345,123456789";
-            var list = new List<Quote>();
-
-            foreach (var sym in symbols)
-            {
-                var key = $"var hq_str_{sym}=\"";
-                var idx = text.IndexOf(key, StringComparison.Ordinal);
-                if (idx < 0) continue;
-
-                idx += key.Length;
-                var end = text.IndexOf("\";", idx, StringComparison.Ordinal);
-                if (end < 0) continue;
-
-                var payload = text.Substring(idx, end - idx);
-                if (string.IsNullOrWhiteSpace(payload)) continue;
-
-                var parts = payload.Split(',');
-                if (parts.Length < 4) continue;
-
-                var name = parts[0]?.Trim();
-                var price = ParseDec(parts[1]);
-                var chgPct = ParseDec(parts[3]);
-
-                list.Add(new Quote
+                using (var resp = await _http.GetAsync(url).ConfigureAwait(false))
                 {
-                    Symbol = sym,
-                    SymbolShort = ToShort(sym),
-                    Name = string.IsNullOrWhiteSpace(name) ? ToShort(sym) : name,
-                    Price = price,
-                    ChangePercent = chgPct
-                });
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        lock (_lock) LastError = $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}";
+                        return null;
+                    }
+
+                    var bytes = await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                    var data = Deserialize<EastMoneyResp>(bytes);
+                    if (data?.Data == null)
+                    {
+                        lock (_lock) LastError = "JSON 解析成功但 data==null（接口可能返回结构变化/被拦截）";
+                        return null;
+                    }
+
+                    // f43 现价，f60 昨收，f58 名称 :contentReference[oaicite:2]{index=2}
+                    var name = data.Data.f58 ?? symbol;
+                    var price = data.Data.f43 / 100.0m;
+                    var prev = data.Data.f60 / 100.0m;
+
+                    return new StockQuote
+                    {
+                        Symbol = symbol,
+                        Name = name,
+                        Price = price,
+                        PrevClose = prev
+                    };
+                }
             }
-
-            // 按涨幅排序（你也可以按代码排序）
-            return list.OrderByDescending(x => x.ChangePercent).ToList();
+            catch (Exception ex)
+            {
+                lock (_lock) LastError = ex.GetType().Name + ": " + ex.Message;
+                return null;
+            }
         }
 
-        private static decimal ParseDec(string s)
+        private static T Deserialize<T>(byte[] jsonBytes) where T : class
         {
-            if (decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v))
-                return v;
-            return 0m;
+            var ser = new DataContractJsonSerializer(typeof(T));
+            using (var ms = new MemoryStream(jsonBytes))
+            {
+                return ser.ReadObject(ms) as T;
+            }
         }
 
-        private static string ToShort(string sym)
+        private static string NormalizeSymbol(string s)
         {
-            // s_sh600519 -> 600519
-            if (string.IsNullOrWhiteSpace(sym)) return sym;
-            var p = sym.LastIndexOf("sh", StringComparison.OrdinalIgnoreCase);
-            if (p >= 0 && sym.Length >= p + 2 + 6) return sym.Substring(p + 2, 6);
-            p = sym.LastIndexOf("sz", StringComparison.OrdinalIgnoreCase);
-            if (p >= 0 && sym.Length >= p + 2 + 6) return sym.Substring(p + 2, 6);
-            return sym;
+            s = (s ?? "").Trim();
+            // 允许用户输入带前缀的 sh600000 / sz000001，统一成 6位数字
+            s = s.Replace("sh", "", StringComparison.OrdinalIgnoreCase)
+                 .Replace("sz", "", StringComparison.OrdinalIgnoreCase);
+            return s;
         }
+
+        private static string ToSecId(string symbol)
+        {
+            if (symbol.StartsWith("6")) return "1." + symbol;   // 上交所
+            return "0." + symbol;                                // 深交所/创业板等
+        }
+
+        private void FireUpdated()
+        {
+            try { DataUpdated?.Invoke(); } catch { }
+        }
+
+        // ----------------- symbols 持久化（简单放到 %TEMP%） -----------------
+        private static string SymbolsFile =>
+            Path.Combine(Path.GetTempPath(), "cadstockv2_symbols.txt");
+
+        private void LoadSymbols()
+        {
+            try
+            {
+                if (File.Exists(SymbolsFile))
+                {
+                    var lines = File.ReadAllLines(SymbolsFile, Encoding.UTF8)
+                        .Select(NormalizeSymbol)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct()
+                        .ToList();
+
+                    _symbols.Clear();
+                    _symbols.AddRange(lines);
+                }
+
+                // 默认给几个，避免你第一次就“暂无数据”
+                if (_symbols.Count == 0)
+                {
+                    _symbols.AddRange(new[] { "600000", "000001", "600519" });
+                    SaveSymbols();
+                }
+            }
+            catch { }
+        }
+
+        private void SaveSymbols()
+        {
+            try
+            {
+                File.WriteAllLines(SymbolsFile, _symbols, Encoding.UTF8);
+            }
+            catch { }
+        }
+    }
+
+    internal sealed class StockQuote
+    {
+        public string Symbol { get; set; }
+        public string Name { get; set; }
+        public decimal Price { get; set; }
+        public decimal PrevClose { get; set; }
+
+        public override string ToString()
+            => $"{Symbol} {Name} {Price}";
+    }
+
+    [DataContract]
+    internal sealed class EastMoneyResp
+    {
+        [DataMember(Name = "data")]
+        public EastMoneyData Data { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class EastMoneyData
+    {
+        [DataMember(Name = "f58")]
+        public string f58 { get; set; } // 名称
+
+        [DataMember(Name = "f43")]
+        public long f43 { get; set; } // 现价 * 100
+
+        [DataMember(Name = "f60")]
+        public long f60 { get; set; } // 昨收 * 100
     }
 }
