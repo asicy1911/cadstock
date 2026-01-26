@@ -188,12 +188,13 @@ namespace cadstockv2
         }
     }
 
-    public class Commands
+    public class ToolbarCommands
+{
+    [CommandMethod("CADSTOCKV2TBRESET")]
+    public void CADSTOCKV2TBRESET()
     {
-        [CommandMethod("CADSTOCKV2TBRESET")]
-        public void CADSTOCKV2TBRESET()
-        {
-            ClassicToolbarDropdownStocks.TryInstall(reset: true);
-        }
+        ClassicToolbarDropdownStocks.TryInstall(reset: true);
     }
+}
+
 }
