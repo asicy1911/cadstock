@@ -51,21 +51,31 @@ namespace cadstockv2
             _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(30, 30, 30);
             _grid.DefaultCellStyle.SelectionForeColor = Color.Gainsboro;
 
-            // ✅ 只保留：名称 / 代码 / 价格
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "名称" });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Code", HeaderText = "代码" });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Price", HeaderText = "价格" });
+            // ✅ 只保留：名称 / 涨跌幅
+            _grid.Columns.Clear();
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "Name",
+                HeaderText = "名称",
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                Name = "Chg",
+                HeaderText = "涨跌幅",
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            });
 
             Controls.Add(_grid);
             Controls.Add(_top);
 
+            // 双击：把这只设为唯一关注（你不想这样可以告诉我改成“添加/删除”）
             _grid.CellDoubleClick += (s, e) =>
             {
                 if (e.RowIndex < 0) return;
                 var sym = _grid.Rows[e.RowIndex].Tag as string;
                 if (!string.IsNullOrWhiteSpace(sym))
                 {
-                    // 你原来这里逻辑像“设为单只关注”，我保留
                     StockQuoteService.Instance.SetSymbols(new[] { sym });
                 }
             };
@@ -77,7 +87,6 @@ namespace cadstockv2
         {
             _symbols = (symbols ?? Array.Empty<string>())
                 .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim())
                 .ToList();
 
             SafeReloadFromService();
@@ -93,18 +102,16 @@ namespace cadstockv2
                 return;
             }
 
-            // ✅ 新：直接拿快照 + 用 LastUpdate (DateTime?)
-            var svc = StockQuoteService.Instance;
-            var list = svc.GetSnapshot();
-            var last = svc.LastUpdate;
+            var list = StockQuoteService.Instance.GetSnapshot();
 
+            // 按当前关注顺序排列
             if (_symbols.Count > 0)
             {
-                // 按当前关注顺序排列（不存在的过滤掉）
-                var map = list.ToDictionary(x => x.Symbol, x => x, StringComparer.OrdinalIgnoreCase);
+                var map = list.ToDictionary(x => x.Symbol, x => x);
                 list = _symbols.Where(map.ContainsKey).Select(s => map[s]).ToList();
             }
 
+            var last = StockQuoteService.Instance.LastUpdate;
             _top.Text = last.HasValue
                 ? $"cadstock v2（{last.Value:HH:mm:ss}）"
                 : "cadstock v2（未更新）";
@@ -113,24 +120,27 @@ namespace cadstockv2
 
             foreach (var q in list)
             {
-                // ✅ Code：用 Symbol（不再用 SymbolShort）
-                int r = _grid.Rows.Add(q.Name, q.Symbol, q.Price.ToString("0.00"));
+                var (chgText, chgColor) = GetChangeTextAndColor(q);
+
+                int r = _grid.Rows.Add(q.Name, chgText);
                 var row = _grid.Rows[r];
                 row.Tag = q.Symbol;
 
-                // ✅ 红涨绿跌：ChangePercent 现在是 decimal（非可空）
-// 用 PrevClose/Price 判定“是否有效”，无效就灰色
-var cp = q.ChangePercent; // decimal
-Color color;
-
-if (q.PrevClose != 0m && q.Price != 0m)
-    color = cp >= 0m ? Color.IndianRed : Color.MediumSeaGreen;
-else
-    color = Color.Gainsboro;
-
-
-                row.Cells["Price"].Style.ForeColor = color;
+                // 只给“涨跌幅”着色
+                row.Cells["Chg"].Style.ForeColor = chgColor;
             }
+        }
+
+        private static (string text, Color color) GetChangeTextAndColor(StockQuote q)
+        {
+            // 没有昨收/现价（或为 0）就视为未知
+            if (q == null || q.PrevClose <= 0m || q.Price <= 0m)
+                return ("—", Color.Gainsboro);
+
+            var cp = q.ChangePercent; // 这里是 “百分比数值”，比如 1.23 表示 1.23%
+            var text = (cp >= 0 ? "+" : "") + cp.ToString("0.00") + "%";
+            var color = cp >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
+            return (text, color);
         }
     }
 }
