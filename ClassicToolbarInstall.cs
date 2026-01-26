@@ -1,7 +1,6 @@
 using System;
 using System.Drawing;
 using System.IO;
-using Autodesk.AutoCAD.Runtime;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 namespace cadstockv2
@@ -55,10 +54,10 @@ namespace cadstockv2
                 if (tb == null)
                     tb = toolbars.Add(ToolbarName);
 
-                // 只保证存在一个按钮：点击弹出动态菜单
+                // 单按钮：不带倒三角图标
                 if (!HasButton(tb, BtnName))
                 {
-                    // 尝试清空旧残留
+                    // 清理旧残留（避免之前版本遗留一堆按钮）
                     try
                     {
                         int c = (int)tb.Count;
@@ -69,11 +68,10 @@ namespace cadstockv2
                     }
                     catch { }
 
-                    // ✅ 单按钮：图标不画倒三角，但点击后弹出动态 ContextMenuStrip
                     tb.AddToolbarButton(
                         (int)tb.Count,
                         BtnName,
-                        "个股行情（下拉）",
+                        "cadstock v2",
                         ESCESC + "_CADSTOCKV2DROPDOWN ",
                         _iconMain
                     );
@@ -134,22 +132,26 @@ namespace cadstockv2
                 CreateBmp(_iconMain);
         }
 
-        // ✅ 图标不画倒三角
+        // 图标：不画倒三角，只画 3 条线（像“列表”）
         private static void CreateBmp(string path)
         {
-            using var bmp = new Bitmap(16, 16);
-            using var g = Graphics.FromImage(bmp);
-            g.Clear(Color.Black);
+            using (var bmp = new Bitmap(16, 16))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Black);
 
-            using var pen = new Pen(Color.Gainsboro, 1);
-            g.DrawRectangle(pen, 1, 1, 13, 13);
+                using (var pen = new Pen(Color.Gainsboro, 1))
+                    g.DrawRectangle(pen, 1, 1, 13, 13);
 
-            using var brush = new SolidBrush(Color.Gainsboro);
-            g.FillRectangle(brush, 4, 4, 8, 2);
-            g.FillRectangle(brush, 4, 7, 8, 2);
-            g.FillRectangle(brush, 4, 10, 8, 2);
+                using (var brush = new SolidBrush(Color.Gainsboro))
+                {
+                    g.FillRectangle(brush, 4, 4, 8, 2);
+                    g.FillRectangle(brush, 4, 7, 8, 2);
+                    g.FillRectangle(brush, 4, 10, 8, 2);
+                }
 
-            bmp.Save(path, System.Drawing.Imaging.ImageFormat.Bmp);
+                bmp.Save(path, System.Drawing.Imaging.ImageFormat.Bmp);
+            }
         }
 
         private static void Write(string msg)
@@ -160,16 +162,6 @@ namespace cadstockv2
                 ed?.WriteMessage("\n[cadstockv2] " + msg);
             }
             catch { }
-        }
-    }
-
-    // ✅ 工具栏重建命令（排查/重置用）
-    public class ToolbarCommands
-    {
-        [CommandMethod("CADSTOCKV2TBRESET")]
-        public void CADSTOCKV2TBRESET()
-        {
-            ClassicToolbarInstall.TryInstall(reset: true);
         }
     }
 }
