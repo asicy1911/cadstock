@@ -3,8 +3,6 @@ using System.Drawing;
 using System.IO;
 using Autodesk.AutoCAD.Runtime;
 using System.Windows.Forms;
-
-// ✅ 给 AutoCAD 的 Application 起别名，避免和 WinForms 的 Application 冲突
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 namespace cadstockv2
@@ -14,47 +12,106 @@ namespace cadstockv2
         private const string MainToolbarName = "cadstock v2";
         private const string ESCESC = "\x03\x03";
 
+        private static bool _installed;
         private static string _iconMain;
         private static string _iconArrow;
 
-        public static void TryInstall()
+        public static void InstallDeferred()
+        {
+            if (_installed) return;
+
+            // ✅ UI 就绪后再创建（很关键）
+            AcApp.Idle -= OnIdle;
+            AcApp.Idle += OnIdle;
+        }
+
+        private static void OnIdle(object sender, EventArgs e)
+        {
+            AcApp.Idle -= OnIdle;
+            TryInstall(reset: false);
+            _installed = true;
+        }
+
+        public static void TryInstall(bool reset)
         {
             try
             {
-                // 启动行情缓存（给下拉菜单用）
                 StockQuoteService.Instance.Start();
-
                 EnsureIcons();
 
                 dynamic acadApp = AcApp.AcadApplication;
+                if (acadApp == null) { Write("AcadApplication == null"); return; }
+
                 dynamic menuGroup = acadApp.MenuGroups.Item(0);
+                if (menuGroup == null) { Write("MenuGroups.Item(0) == null"); return; }
+
                 dynamic toolbars = menuGroup.Toolbars;
+                if (toolbars == null) { Write("menuGroup.Toolbars == null"); return; }
 
-                dynamic tb = FindToolbar(toolbars, MainToolbarName) ?? toolbars.Add(MainToolbarName);
+                dynamic tb = FindToolbar(toolbars, MainToolbarName);
 
-                // 防重复：如果已有按钮就不再加
-                if ((int)tb.Count == 0)
+                if (reset && tb != null)
                 {
-                    // 主按钮：打开面板
-                    tb.AddToolbarButton((int)tb.Count, "Open", "打开面板", ESCESC + "_CADSTOCKV2 ", _iconMain);
+                    try { tb.Delete(); } catch { }
+                    tb = null;
+                }
 
+                if (tb == null)
+                {
+                    tb = toolbars.Add(MainToolbarName);
+                }
+
+                // 关键：不要只靠 Count==0（有时会残留空按钮/分隔符）
+                // 我们检查是否已经有 “Dropdown” 这个按钮名，没有就补齐
+                if (!HasButton(tb, "Dropdown"))
+                {
+                    // 清空再建（防空壳/残留）
+                    try
+                    {
+                        // 尝试删除所有 items（有些版本不支持逐个删，就跳过）
+                        int c = (int)tb.Count;
+                        for (int i = c; i >= 1; i--)
+                        {
+                            try { tb.Item(i).Delete(); } catch { }
+                        }
+                    }
+                    catch { }
+
+                    AddBtn(tb, "Open", "打开面板", ESCESC + "_CADSTOCKV2 ", _iconMain);
                     tb.AddSeparator((int)tb.Count);
 
-                    // 倒三角按钮：弹出下拉列表
-                    tb.AddToolbarButton((int)tb.Count, "Dropdown", "下拉（个股行情）", ESCESC + "_CADSTOCKV2DROPDOWN ", _iconArrow);
+                    // 倒三角按钮：弹出下拉（显示实时个股）
+                    AddBtn(tb, "Dropdown", "下拉（个股行情）", ESCESC + "_CADSTOCKV2DROPDOWN ", _iconArrow);
 
                     tb.AddSeparator((int)tb.Count);
-
-                    tb.AddToolbarButton((int)tb.Count, "Refresh", "刷新面板", ESCESC + "_CADSTOCKV2REFRESH ", _iconMain);
-                    tb.AddToolbarButton((int)tb.Count, "Stop", "关闭面板", ESCESC + "_CADSTOCKV2STOP ", _iconMain);
+                    AddBtn(tb, "Refresh", "刷新面板", ESCESC + "_CADSTOCKV2REFRESH ", _iconMain);
+                    AddBtn(tb, "Stop", "关闭面板", ESCESC + "_CADSTOCKV2STOP ", _iconMain);
                 }
 
                 tb.Visible = true;
+                Write($"Toolbar OK: {MainToolbarName} (Visible={tb.Visible})");
             }
-            catch
+            catch (Exception ex)
             {
-                // 不影响主体
+                Write("Toolbar install failed: " + ex.GetType().Name + " - " + ex.Message);
             }
+        }
+
+        private static bool HasButton(dynamic tb, string name)
+        {
+            try
+            {
+                int c = (int)tb.Count;
+                for (int i = 1; i <= c; i++)
+                {
+                    dynamic item = tb.Item(i);
+                    string n = (string)(item?.Name ?? "");
+                    if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static dynamic FindToolbar(dynamic toolbars, string name)
@@ -71,6 +128,11 @@ namespace cadstockv2
             }
             catch { }
             return null;
+        }
+
+        private static void AddBtn(dynamic toolbar, string name, string help, string macro, string bmpPath)
+        {
+            toolbar.AddToolbarButton((int)toolbar.Count, name, help, macro, bmpPath);
         }
 
         private static void EnsureIcons()
@@ -100,14 +162,12 @@ namespace cadstockv2
 
             if (drawArrow)
             {
-                // 画一个倒三角
                 using var brush = new SolidBrush(Color.Gainsboro);
                 Point[] tri = { new Point(5, 6), new Point(11, 6), new Point(8, 10) };
                 g.FillPolygon(brush, tri);
             }
             else
             {
-                // 画一个小 “S” 形标记
                 using var brush = new SolidBrush(Color.Gainsboro);
                 g.FillRectangle(brush, 5, 4, 6, 2);
                 g.FillRectangle(brush, 5, 7, 6, 2);
@@ -116,53 +176,24 @@ namespace cadstockv2
 
             bmp.Save(path, System.Drawing.Imaging.ImageFormat.Bmp);
         }
+
+        private static void Write(string msg)
+        {
+            try
+            {
+                var ed = AcApp.DocumentManager.MdiActiveDocument?.Editor;
+                ed?.WriteMessage("\n[cadstockv2] " + msg);
+            }
+            catch { }
+        }
     }
 
-    public class DropdownCommands
+    public class Commands
     {
-        [CommandMethod("CADSTOCKV2DROPDOWN")]
-        public void CADSTOCKV2DROPDOWN()
+        [CommandMethod("CADSTOCKV2TBRESET")]
+        public void CADSTOCKV2TBRESET()
         {
-            // 弹出菜单（WinForms）
-            var menu = new ContextMenuStrip
-            {
-                ShowImageMargin = false
-            };
-
-            var quotes = StockQuoteService.Instance.GetSnapshot(out var last);
-            var header = new ToolStripMenuItem($"更新时间：{(last == DateTime.MinValue ? "无" : last.ToString("HH:mm:ss"))}")
-            {
-                Enabled = false
-            };
-            menu.Items.Add(header);
-            menu.Items.Add(new ToolStripSeparator());
-
-            if (quotes.Count == 0)
-            {
-                menu.Items.Add(new ToolStripMenuItem("暂无数据（稍等或检查网络）") { Enabled = false });
-            }
-            else
-            {
-                foreach (var q in quotes)
-                {
-                    var item = new ToolStripMenuItem(q.ToMenuText())
-                    {
-                        ForeColor = q.GetColor()
-                    };
-
-                    item.Click += (s, e) =>
-                    {
-                        // 选择某只股票：把面板切到这只（或你也可以改成多只）
-                        PaletteHost.ApplySymbols(new[] { q.Symbol });
-                    };
-
-                    menu.Items.Add(item);
-                }
-            }
-
-            // 在鼠标位置弹出
-            var p = Cursor.Position;
-            menu.Show(p);
+            ClassicToolbarDropdownStocks.TryInstall(reset: true);
         }
     }
 }
