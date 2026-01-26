@@ -1,9 +1,11 @@
 using System;
 using System.Drawing;
 using System.IO;
-using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
 using System.Windows.Forms;
+
+// ✅ 给 AutoCAD 的 Application 起别名，避免和 WinForms 的 Application 冲突
+using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 namespace cadstockv2
 {
@@ -24,7 +26,7 @@ namespace cadstockv2
 
                 EnsureIcons();
 
-                dynamic acadApp = Application.AcadApplication;
+                dynamic acadApp = AcApp.AcadApplication;
                 dynamic menuGroup = acadApp.MenuGroups.Item(0);
                 dynamic toolbars = menuGroup.Toolbars;
 
