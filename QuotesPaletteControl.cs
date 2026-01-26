@@ -69,7 +69,7 @@ namespace cadstockv2
             Controls.Add(_grid);
             Controls.Add(_top);
 
-            // 双击：把这只设为唯一关注（你不想这样可以告诉我改成“添加/删除”）
+            // 双击：把这只设为唯一关注（不想这样我再给你改）
             _grid.CellDoubleClick += (s, e) =>
             {
                 if (e.RowIndex < 0) return;
@@ -120,7 +120,9 @@ namespace cadstockv2
 
             foreach (var q in list)
             {
-                var (chgText, chgColor) = GetChangeTextAndColor(q);
+                string chgText;
+                Color chgColor;
+                GetChangeTextAndColor(q, out chgText, out chgColor);
 
                 int r = _grid.Rows.Add(q.Name, chgText);
                 var row = _grid.Rows[r];
@@ -131,16 +133,20 @@ namespace cadstockv2
             }
         }
 
-        private static (string text, Color color) GetChangeTextAndColor(StockQuote q)
+        private static void GetChangeTextAndColor(StockQuote q, out string text, out Color color)
         {
             // 没有昨收/现价（或为 0）就视为未知
             if (q == null || q.PrevClose <= 0m || q.Price <= 0m)
-                return ("—", Color.Gainsboro);
+            {
+                text = "—";
+                color = Color.Gainsboro;
+                return;
+            }
 
-            var cp = q.ChangePercent; // 这里是 “百分比数值”，比如 1.23 表示 1.23%
-            var text = (cp >= 0 ? "+" : "") + cp.ToString("0.00") + "%";
-            var color = cp >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
-            return (text, color);
+            // ChangePercent 是 decimal（不是 nullable）
+            var cp = q.ChangePercent; // 1.23 表示 1.23%
+            text = (cp >= 0 ? "+" : "") + cp.ToString("0.00") + "%";
+            color = cp >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
         }
     }
 }
