@@ -13,7 +13,8 @@ namespace cadstockv2
         private const string ESCESC = "\x03\x03";
 
         private static bool _installed;
-        private static string _iconMain;
+        private static string _bmp16;
+        private static string _bmp32;
 
         public static void InstallDeferred()
         {
@@ -33,7 +34,7 @@ namespace cadstockv2
         {
             try
             {
-                EnsureIcon(forceRegen: false);
+                EnsureIcons(forceRegen: false);
 
                 dynamic acadApp = AcApp.AcadApplication;
                 if (acadApp == null) { Write("AcadApplication == null"); return; }
@@ -55,10 +56,10 @@ namespace cadstockv2
                 if (tb == null)
                     tb = toolbars.Add(ToolbarName);
 
-                // 单按钮：不带倒三角图标
+                // 单按钮
                 if (!HasButton(tb, BtnName))
                 {
-                    // 清理旧残留（避免之前版本遗留一堆按钮）
+                    // 清理旧残留
                     try
                     {
                         int c = (int)tb.Count;
@@ -69,33 +70,28 @@ namespace cadstockv2
                     }
                     catch { }
 
-                    tb.AddToolbarButton(
+                    // ✅ 只传 4 个参数：不要传第 5 个 FlyoutButton
+                    dynamic btn = tb.AddToolbarButton(
                         (int)tb.Count,
                         BtnName,
                         "cadstock v2",
-                        ESCESC + "_CADSTOCKV2DROPDOWN ",
-                        _iconMain
+                        ESCESC + "_CADSTOCKV2DROPDOWN "
                     );
+
+                    // ✅ 用 SetBitmaps 设置图标（16/32 都给）
+                    try
+                    {
+                        btn.SetBitmaps(_bmp16, _bmp32);
+                    }
+                    catch
+                    {
+                        // 有些版本只认一个，也可以同一个路径兜底
+                        try { btn.SetBitmaps(_bmp16, _bmp16); } catch { }
+                    }
                 }
 
                 tb.Visible = true;
                 Write($"Toolbar OK: {ToolbarName}");
-            }
-            catch (InvalidOperationException ioe)
-            {
-                // 你遇到的就是这个：Indexed Bitmap 不支持 SetPixel
-                Write("Toolbar install failed: " + ioe.Message + " -> 强制重建图标后重试");
-
-                try
-                {
-                    EnsureIcon(forceRegen: true);
-                    // 再试一次
-                    TryInstall(reset: false);
-                }
-                catch (Exception ex2)
-                {
-                    Write("Retry failed: " + ex2.GetType().Name + " - " + ex2.Message);
-                }
             }
             catch (Exception ex)
             {
@@ -136,38 +132,49 @@ namespace cadstockv2
             return null;
         }
 
-        private static void EnsureIcon(bool forceRegen)
+        private static void EnsureIcons(bool forceRegen)
         {
             var dir = Path.Combine(Path.GetTempPath(), "cadstockv2_icons");
             Directory.CreateDirectory(dir);
 
-            _iconMain = Path.Combine(dir, "main.bmp");
+            _bmp16 = Path.Combine(dir, "main16.bmp");
+            _bmp32 = Path.Combine(dir, "main32.bmp");
 
-            if (forceRegen && File.Exists(_iconMain))
+            if (forceRegen)
             {
-                try { File.Delete(_iconMain); } catch { }
+                try { if (File.Exists(_bmp16)) File.Delete(_bmp16); } catch { }
+                try { if (File.Exists(_bmp32)) File.Delete(_bmp32); } catch { }
             }
 
-            if (!File.Exists(_iconMain))
-                CreateBmp32(_iconMain);
+            if (!File.Exists(_bmp16)) CreateBmp(_bmp16, 16, 16);
+            if (!File.Exists(_bmp32)) CreateBmp(_bmp32, 32, 32);
         }
 
-        // 图标：不画倒三角，只画“列表”3条线；强制 32bpp，避免 Indexed
-        private static void CreateBmp32(string path)
+        // 图标：三条线“列表”，不画倒三角；强制 32bpp，避免 Indexed
+        private static void CreateBmp(string path, int w, int h)
         {
-            using (var bmp = new Bitmap(16, 16, PixelFormat.Format32bppArgb))
+            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
             using (var g = Graphics.FromImage(bmp))
             {
                 g.Clear(Color.Black);
 
+                int pad = (w <= 16) ? 1 : 2;
+                int box = w - pad - 3;
+
                 using (var pen = new Pen(Color.Gainsboro, 1))
-                    g.DrawRectangle(pen, 1, 1, 13, 13);
+                    g.DrawRectangle(pen, pad, pad, box, box);
 
                 using (var brush = new SolidBrush(Color.Gainsboro))
                 {
-                    g.FillRectangle(brush, 4, 4, 8, 2);
-                    g.FillRectangle(brush, 4, 7, 8, 2);
-                    g.FillRectangle(brush, 4, 10, 8, 2);
+                    int x = pad + (w <= 16 ? 3 : 6);
+                    int y1 = pad + (w <= 16 ? 3 : 7);
+                    int barW = (w <= 16 ? 8 : 16);
+                    int barH = (w <= 16 ? 2 : 4);
+                    int gap = (w <= 16 ? 3 : 6);
+
+                    g.FillRectangle(brush, x, y1, barW, barH);
+                    g.FillRectangle(brush, x, y1 + gap, barW, barH);
+                    g.FillRectangle(brush, x, y1 + gap * 2, barW, barH);
                 }
 
                 bmp.Save(path, ImageFormat.Bmp);
