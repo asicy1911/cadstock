@@ -1,11 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -15,205 +13,190 @@ namespace cadstockv2
     {
         public static StockQuoteService Instance { get; } = new StockQuoteService();
 
-        private readonly HttpClient _http = new HttpClient();
         private readonly object _lock = new object();
-        private List<Quote> _latest = new List<Quote>();
-        private DateTime _lastUpdate = DateTime.MinValue;
-
-        // 你可以改成自己的关注列表（必须用 s_ 简版格式）
-        private readonly List<string> _watch = new List<string>
+        private readonly List<string> _symbols = new List<string>
         {
-            "s_sh600519", // 贵州茅台
-            "s_sh601318", // 中国平安
-            "s_sh600036", // 招商银行
-            "s_sh600000", // 浦发银行
-            "s_sz000001", // 平安银行
-            "s_sz300750", // 宁德时代
-            "s_sz002594", // 比亚迪
-            "s_sh600941", // 中国移动(A股)
+            // 默认关注（你可改）
+            "s_sh600519",
+            "s_sh601318",
+            "s_sh600036",
+            "s_sz000001",
+            "s_sz300750",
         };
 
-        private int _intervalMs = 5000;
-        private Timer _timer;
-        private int _refreshing;
+        private readonly List<Quote> _snapshot = new List<Quote>();
+        private DateTime _lastUpdate = DateTime.MinValue;
 
-        private StockQuoteService()
-        {
-            _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0");
-            _http.Timeout = TimeSpan.FromSeconds(10);
-        }
+        private Timer _timer;
+        private readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+        private readonly SemaphoreSlim _refreshGate = new SemaphoreSlim(1, 1);
+
+        private volatile bool _started;
+
+        private StockQuoteService() { }
 
         public void Start()
         {
-            if (_timer != null) return;
-            _timer = new Timer(async _ => await RefreshAsync(), null, 0, _intervalMs);
+            if (_started) return;
+            _started = true;
+
+            _timer?.Dispose();
+            _timer = new Timer(async _ => await SafeRefreshAsync().ConfigureAwait(false), null, 0, 5000);
         }
 
         public void Stop()
         {
+            _started = false;
             _timer?.Dispose();
             _timer = null;
         }
 
-        public IReadOnlyList<Quote> GetSnapshot(out DateTime lastUpdate)
+        public void SetSymbols(IEnumerable<string> symbols)
+        {
+            if (symbols == null) return;
+            lock (_lock)
+            {
+                _symbols.Clear();
+                _symbols.AddRange(symbols.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct());
+            }
+            ForceRefresh();
+        }
+
+        public void ForceRefresh()
+        {
+            _ = SafeRefreshAsync();
+        }
+
+        public List<Quote> GetSnapshot(out DateTime lastUpdate)
         {
             lock (_lock)
             {
                 lastUpdate = _lastUpdate;
-                return _latest.ToList();
+                return _snapshot.Select(x => x.Clone()).ToList();
             }
         }
 
-        public void SetWatchlist(IEnumerable<string> symbols)
+        private async Task SafeRefreshAsync()
         {
-            var list = (symbols ?? Array.Empty<string>())
-                .Select(x => (x ?? "").Trim())
-                .Where(x => x.Length > 0)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            if (!_started) return;
+            if (!await _refreshGate.WaitAsync(0).ConfigureAwait(false)) return;
 
-            if (list.Count == 0) return;
-
-            lock (_lock)
+            try
             {
-                _watch.Clear();
-                _watch.AddRange(list);
+                await RefreshAsync().ConfigureAwait(false);
             }
-
-            _ = RefreshAsync();
+            catch
+            {
+                // 不抛给 CAD，静默失败即可（菜单会显示暂无数据或旧数据）
+            }
+            finally
+            {
+                _refreshGate.Release();
+            }
         }
 
         private async Task RefreshAsync()
         {
-            // 防止重入
-            if (Interlocked.Exchange(ref _refreshing, 1) == 1) return;
+            List<string> syms;
+            lock (_lock) syms = _symbols.ToList();
+            if (syms.Count == 0) return;
 
-            try
-            {
-                List<string> symbols;
-                lock (_lock) symbols = _watch.ToList();
+            // Sina 行情：返回 GBK，形如 var hq_str_s_sh600519="..."
+            var url = "https://hq.sinajs.cn/list=" + string.Join(",", syms);
 
-                var quotes = await FetchSinaSimpleAsync(symbols);
+            byte[] bytes = await _http.GetByteArrayAsync(url).ConfigureAwait(false);
+            var text = Encoding.GetEncoding("GBK").GetString(bytes);
 
-                lock (_lock)
-                {
-                    _latest = quotes;
-                    _lastUpdate = DateTime.Now;
-                }
-            }
-            catch
+            var parsed = QuoteParser.ParseSinaMini(text, syms);
+
+            lock (_lock)
             {
-                // 下拉菜单里显示“上次数据”，这里静默即可
+                _snapshot.Clear();
+                _snapshot.AddRange(parsed);
+                _lastUpdate = DateTime.Now;
             }
-            finally
-            {
-                Interlocked.Exchange(ref _refreshing, 0);
-            }
+
+            // 通知面板刷新
+            PaletteHost.NotifyQuotesUpdated();
         }
+    }
 
-        private async Task<List<Quote>> FetchSinaSimpleAsync(IReadOnlyList<string> symbols)
+    internal sealed class Quote
+    {
+        public string Symbol { get; set; }          // s_sh600519
+        public string SymbolShort { get; set; }     // 600519
+        public string Name { get; set; }            // 贵州茅台
+        public decimal Price { get; set; }          // 当前价
+        public decimal ChangePercent { get; set; }  // 涨跌幅（用于颜色，不展示列）
+
+        public Quote Clone() => new Quote
         {
-            if (symbols == null || symbols.Count == 0) return new List<Quote>();
+            Symbol = Symbol,
+            SymbolShort = SymbolShort,
+            Name = Name,
+            Price = Price,
+            ChangePercent = ChangePercent
+        };
+    }
 
-            var qs = string.Join(",", symbols);
-            var urls = new[]
-            {
-                "https://hq.sinajs.cn/list=" + qs,
-                "http://hq.sinajs.cn/list=" + qs
-            };
-
-            HttpResponseMessage resp = null;
-            Exception last = null;
-
-            foreach (var url in urls)
-            {
-                try
-                {
-                    using var req = new HttpRequestMessage(HttpMethod.Get, url);
-                    req.Headers.TryAddWithoutValidation("Referer", "https://finance.sina.com.cn/");
-                    resp = await _http.SendAsync(req);
-                    resp.EnsureSuccessStatusCode();
-                    last = null;
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    last = ex;
-                    resp?.Dispose();
-                    resp = null;
-                }
-            }
-
-            if (last != null) throw last;
-
-            var bytes = await resp.Content.ReadAsByteArrayAsync();
-            var text = Encoding.GetEncoding("GB2312").GetString(bytes);
-
-            // s_简版：name, price, chg, pct, volume, amount
-            var rx = new Regex(@"var\s+hq_str_(?<sym>[^=]+)=""(?<data>[^""]*)"";", RegexOptions.Compiled);
-
+    internal static class QuoteParser
+    {
+        public static List<Quote> ParseSinaMini(string text, List<string> symbols)
+        {
+            // s_ 开头的简版字段：name,price,chg,chgPercent,volume,amount
+            // 例：var hq_str_s_sh600519="贵州茅台,1600.00,5.00,0.31,12345,123456789";
             var list = new List<Quote>();
 
-            foreach (Match m in rx.Matches(text))
+            foreach (var sym in symbols)
             {
-                var sym = m.Groups["sym"].Value.Trim(); // e.g. s_sh600519
-                var data = m.Groups["data"].Value.Trim();
-                if (string.IsNullOrWhiteSpace(data)) continue;
+                var key = $"var hq_str_{sym}=\"";
+                var idx = text.IndexOf(key, StringComparison.Ordinal);
+                if (idx < 0) continue;
 
-                var parts = data.Split(',').Select(x => x.Trim()).ToArray();
+                idx += key.Length;
+                var end = text.IndexOf("\";", idx, StringComparison.Ordinal);
+                if (end < 0) continue;
+
+                var payload = text.Substring(idx, end - idx);
+                if (string.IsNullOrWhiteSpace(payload)) continue;
+
+                var parts = payload.Split(',');
                 if (parts.Length < 4) continue;
 
-                var name = parts[0];
-                var price = ParseDecimal(parts[1]);
-                var chg = ParseDecimal(parts[2]);
-                var pct = ParseDecimal(parts[3]);
+                var name = parts[0]?.Trim();
+                var price = ParseDec(parts[1]);
+                var chgPct = ParseDec(parts[3]);
 
                 list.Add(new Quote
                 {
                     Symbol = sym,
-                    Name = name,
+                    SymbolShort = ToShort(sym),
+                    Name = string.IsNullOrWhiteSpace(name) ? ToShort(sym) : name,
                     Price = price,
-                    Change = chg,
-                    ChangePct = pct
+                    ChangePercent = chgPct
                 });
             }
 
-            // 保持 watchlist 顺序
-            var order = symbols.Select((s, i) => new { s, i })
-                .ToDictionary(x => x.s, x => x.i, StringComparer.OrdinalIgnoreCase);
-
-            return list.OrderBy(q => order.TryGetValue(q.Symbol, out var i) ? i : int.MaxValue).ToList();
+            // 按涨幅排序（你也可以按代码排序）
+            return list.OrderByDescending(x => x.ChangePercent).ToList();
         }
 
-        private static decimal ParseDecimal(string s)
+        private static decimal ParseDec(string s)
         {
-            if (string.IsNullOrWhiteSpace(s)) return 0m;
-            s = s.Replace("%", "").Trim();
-            decimal.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v);
-            return v;
+            if (decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v))
+                return v;
+            return 0m;
         }
 
-        internal sealed class Quote
+        private static string ToShort(string sym)
         {
-            public string Symbol { get; set; }
-            public string Name { get; set; }
-            public decimal Price { get; set; }
-            public decimal Change { get; set; }
-            public decimal ChangePct { get; set; }
-
-            public Color GetColor()
-            {
-                if (ChangePct > 0) return Color.IndianRed;
-                if (ChangePct < 0) return Color.LimeGreen;
-                return Color.Gainsboro;
-            }
-
-            public string ToMenuText()
-            {
-                // 例：贵州茅台 1688.00 +1.23%
-                var sign = ChangePct > 0 ? "+" : "";
-                return $"{Name}  {Price:0.##}  {sign}{ChangePct:0.##}%";
-            }
+            // s_sh600519 -> 600519
+            if (string.IsNullOrWhiteSpace(sym)) return sym;
+            var p = sym.LastIndexOf("sh", StringComparison.OrdinalIgnoreCase);
+            if (p >= 0 && sym.Length >= p + 2 + 6) return sym.Substring(p + 2, 6);
+            p = sym.LastIndexOf("sz", StringComparison.OrdinalIgnoreCase);
+            if (p >= 0 && sym.Length >= p + 2 + 6) return sym.Substring(p + 2, 6);
+            return sym;
         }
     }
 }
