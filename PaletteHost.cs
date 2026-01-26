@@ -13,6 +13,7 @@ namespace cadstock
             if (_ps == null)
             {
                 _ctrl = new QuotesPaletteControl();
+
                 _ps = new PaletteSet("cadstock")
                 {
                     Style = PaletteSetStyles.ShowAutoHideButton |
@@ -20,11 +21,13 @@ namespace cadstock
                             PaletteSetStyles.ShowPropertiesMenu,
                     DockEnabled = DockSides.Left | DockSides.Right,
                     MinimumSize = new System.Drawing.Size(380, 220),
-                    Size = new System.Drawing.Size(560, 340),
+                    Size = new System.Drawing.Size(560, 320),
                     Visible = true
                 };
 
                 _ps.Add("行情", _ctrl);
+
+                // 自动刷新（保持不变）
                 _ctrl.Start();
             }
             else
