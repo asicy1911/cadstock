@@ -216,7 +216,7 @@ namespace cadstockv2
             };
             openPanel.Click += (s, e) =>
             {
-                try { AcApp.DocumentManager.MdiActiveDocument?.SendStringToExecute("CADSTOCKV2PALETTE ", true, false, true); }
+                try { AcApp.DocumentManager.MdiActiveDocument?.SendStringToExecute("CADSTOCKV2 ", true, false, true); }
                 catch { }
             };
             menu.Items.Add(openPanel);
