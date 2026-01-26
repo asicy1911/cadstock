@@ -13,11 +13,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- AutoCAD 2018 对应 R22.0 -->
     <PackageReference Include="AutoCAD.NET" Version="22.0.0" />
   </ItemGroup>
 
-  <!-- ✅ SDK 风格 net46 下需要显式引用这些 .NET Framework 程序集 -->
+  <!-- SDK 风格 net46 下显式引用 WinForms / Http -->
   <ItemGroup>
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
