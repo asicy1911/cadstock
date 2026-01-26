@@ -118,13 +118,16 @@ namespace cadstockv2
                 var row = _grid.Rows[r];
                 row.Tag = q.Symbol;
 
-                // ✅ 红涨绿跌：需要 ChangePercent；如果你 StockQuote 里没有，就先按“未知=灰色”
-                var cp = q.ChangePercent; // 下面我会告诉你 StockQuoteService 里要提供它
-                Color color;
-                if (cp.HasValue)
-                    color = cp.Value >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
-                else
-                    color = Color.Gainsboro;
+                // ✅ 红涨绿跌：ChangePercent 现在是 decimal（非可空）
+// 用 PrevClose/Price 判定“是否有效”，无效就灰色
+var cp = q.ChangePercent; // decimal
+Color color;
+
+if (q.PrevClose != 0m && q.Price != 0m)
+    color = cp >= 0m ? Color.IndianRed : Color.MediumSeaGreen;
+else
+    color = Color.Gainsboro;
+
 
                 row.Cells["Price"].Style.ForeColor = color;
             }
