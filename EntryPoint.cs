@@ -14,7 +14,7 @@ namespace cadstockv2
         {
             // 方案 B：不再创建 “cadstock v2” 经典工具栏
             // 只在 UI 就绪后把旧的 “cadstock v2” 工具栏自动隐藏
-            ClassicToolbarInstall.HideLegacyToolbarDeferred(delete: false);
+            ClassicToolbarInstall.HideLegacyToolbarDeferred(delete: true);
 
             // 可选：启动行情服务（建议保留，菜单/面板会更快有数据）
             StockQuoteService.Instance.Start();
