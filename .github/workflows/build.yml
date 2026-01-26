@@ -1,4 +1,4 @@
-name: build-autocad-2018-plugin
+name: build-cadstock
 
 on:
   push:
@@ -16,12 +16,12 @@ jobs:
       - name: Restore + Build (Release x64)
         shell: pwsh
         run: |
-          msbuild .\CadIndexTicker.sln /t:Build /p:Configuration=Release /p:Platform=x64 /restore
+          msbuild .\cadstock.csproj /t:Build /p:Configuration=Release /p:Platform=x64 /restore
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CadIndexTicker
+          name: cadstock
           path: |
             **\bin\Release\*.dll
             **\bin\Release\*.pdb
