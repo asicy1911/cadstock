@@ -22,5 +22,6 @@ jobs:
         with:
           name: cadstock
           path: |
-            **\bin\Release\*.dll
-            **\bin\Release\*.pdb
+            bin\x64\Release\net46\cadstock.dll
+            bin\x64\Release\net46\cadstock.pdb
+
