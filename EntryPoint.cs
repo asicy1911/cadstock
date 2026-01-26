@@ -8,10 +8,10 @@ namespace cadstockv2
     public class EntryPoint : IExtensionApplication
     {
         public void Initialize()
-        {
-            // ✅ 经典工具栏：创建“下拉（flyout）”控件
-            ClassicToolbarFlyout.TryInstall();
-        }
+{
+    ClassicToolbarDropdownStocks.TryInstall();
+}
+
 
         public void Terminate()
         {
