@@ -15,7 +15,7 @@ jobs:
       - name: Restore + Build (Release x64)
         shell: pwsh
         run: |
-          msbuild .\cadstock.csproj /t:Build /p:Configuration=Release /p:Platform=x64 /restore
+          msbuild .\cadstockv2.csproj /t:Build /p:Configuration=Release /p:Platform=x64 /restore
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
