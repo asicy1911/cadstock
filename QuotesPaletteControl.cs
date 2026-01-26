@@ -18,12 +18,13 @@ namespace cadstock
         private readonly Timer _timer = new Timer();
         private readonly HttpClient _http = new HttpClient();
 
+        // 默认指数
         private List<string> _symbols = new List<string>
         {
-            "s_sh000001",
-            "s_sz399001",
-            "s_sz399006",
-            "s_sh000300",
+            "s_sh000001", // 上证
+            "s_sz399001", // 深成
+            "s_sz399006", // 创业板
+            "s_sh000300", // 沪深300
         };
 
         private int _intervalMs = 2000;
@@ -34,7 +35,7 @@ namespace cadstock
             BuildUi();
 
             _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0");
-            _http.Timeout = TimeSpan.FromSeconds(4);
+            _http.Timeout = TimeSpan.FromSeconds(12);
 
             _timer.Interval = _intervalMs;
             _timer.Tick += async (s, e) => await RefreshAsync();
@@ -83,10 +84,10 @@ namespace cadstock
 
             _grid.GridColor = Color.FromArgb(30, 30, 30);
 
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "指数", FillWeight = 42 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Last", HeaderText = "点位", FillWeight = 23 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Chg", HeaderText = "涨跌", FillWeight = 18 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Pct", HeaderText = "涨跌幅", FillWeight = 17 });
+            // ✅ 只保留：指数 / 点位 / 涨跌幅
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "指数", FillWeight = 50 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Last", HeaderText = "点位", FillWeight = 28 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Pct", HeaderText = "涨跌幅", FillWeight = 22 });
 
             var menu = new ContextMenuStrip();
             menu.Items.Add("设置刷新间隔(秒)…", null, (s, e) => SetInterval());
@@ -136,6 +137,10 @@ namespace cadstock
                 Render(quotes);
                 _status.Text = $"cadstock：{DateTime.Now:HH:mm:ss} 刷新完成（{_symbols.Count}）  右键可设置";
             }
+            catch (TaskCanceledException)
+            {
+                _status.Text = $"cadstock：刷新超时 {DateTime.Now:HH:mm:ss}";
+            }
             catch (Exception ex)
             {
                 _status.Text = $"cadstock：刷新失败 {DateTime.Now:HH:mm:ss}  {ex.Message}";
@@ -146,17 +151,41 @@ namespace cadstock
             }
         }
 
+        // Sina： https://hq.sinajs.cn/list=s_sh000001,s_sz399001...
         private async Task<List<Quote>> FetchSinaIndexAsync(IReadOnlyList<string> symbols)
         {
             if (symbols == null || symbols.Count == 0) return new List<Quote>();
 
-            var url = "https://hq.sinajs.cn/list=" + string.Join(",", symbols);
+            var qs = string.Join(",", symbols);
+            var urls = new[]
+            {
+                "https://hq.sinajs.cn/list=" + qs,
+                "http://hq.sinajs.cn/list=" + qs
+            };
 
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.TryAddWithoutValidation("Referer", "https://finance.sina.com.cn/");
+            HttpResponseMessage resp = null;
+            Exception last = null;
 
-            using var resp = await _http.SendAsync(req);
-            resp.EnsureSuccessStatusCode();
+            foreach (var url in urls)
+            {
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                    req.Headers.TryAddWithoutValidation("Referer", "https://finance.sina.com.cn/");
+                    resp = await _http.SendAsync(req);
+                    resp.EnsureSuccessStatusCode();
+                    last = null;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    resp?.Dispose();
+                    resp = null;
+                }
+            }
+
+            if (last != null) throw last;
 
             var bytes = await resp.Content.ReadAsByteArrayAsync();
             var text = Encoding.GetEncoding("GB2312").GetString(bytes);
@@ -171,6 +200,7 @@ namespace cadstock
                 if (string.IsNullOrWhiteSpace(data)) continue;
 
                 var parts = data.Split(',').Select(x => x.Trim()).ToArray();
+                // 指数：name,last,chg,pct,...
                 if (parts.Length < 4) continue;
 
                 list.Add(new Quote
@@ -183,8 +213,10 @@ namespace cadstock
                 });
             }
 
+            // 保持输入顺序
             var order = symbols.Select((s, i) => new { s, i })
                                .ToDictionary(x => x.s, x => x.i, StringComparer.OrdinalIgnoreCase);
+
             return list.OrderBy(x => order.TryGetValue(x.Symbol, out var i) ? i : int.MaxValue).ToList();
         }
 
@@ -201,25 +233,25 @@ namespace cadstock
             _grid.SuspendLayout();
             _grid.Rows.Clear();
 
-            // 你最爱的配色在这里改：
-            var up = Color.IndianRed;    // 涨
-            var down = Color.LimeGreen;  // 跌
-            var flat = Color.Gainsboro;  // 平
+            // 配色：涨红跌绿（你想换就改这里）
+            var up = Color.IndianRed;
+            var down = Color.LimeGreen;
+            var flat = Color.Gainsboro;
 
             foreach (var q in quotes)
             {
+                // ✅ 不再显示 “涨跌(Chg)”，只显示点位+涨跌幅
                 var idx = _grid.Rows.Add(
                     q.Name,
                     q.Last.ToString("0.###"),
-                    q.Change.ToString("0.###"),
                     q.ChangePct.ToString("0.##") + "%");
 
                 var row = _grid.Rows[idx];
-                var c = q.Change > 0 ? up : (q.Change < 0 ? down : flat);
 
-                row.Cells["Chg"].Style.ForeColor = c;
+                // 用涨跌幅决定颜色（也可以用 q.Change）
+                var c = q.ChangePct > 0 ? up : (q.ChangePct < 0 ? down : flat);
+
                 row.Cells["Pct"].Style.ForeColor = c;
-
                 row.Cells["Last"].Style.ForeColor = Color.White;
                 row.Cells["Name"].Style.ForeColor = Color.Gainsboro;
                 row.Height = 26;
