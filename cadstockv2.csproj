@@ -1,28 +1,39 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- AutoCAD 2018 常用：.NET Framework 4.6 -->
     <TargetFramework>net46</TargetFramework>
 
     <!-- ✅ v2 不覆盖 v1 -->
     <AssemblyName>cadstockv2</AssemblyName>
     <RootNamespace>cadstockv2</RootNamespace>
 
+    <!-- 构建目标 -->
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
 
+    <!-- 保险：避免某些 CI/SDK 组合导致 dynamic binder 缺失 -->
+    <NoStdLib>false</NoStdLib>
+
+    <!-- 可选：源码语言版本 -->
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- AutoCAD 2018 对应 R22.0 -->
+    <!-- AutoCAD 2018 (R22.0) -->
     <PackageReference Include="AutoCAD.NET" Version="22.0.0" />
   </ItemGroup>
 
-  <!-- SDK 风格 net46 下显式引用 WinForms / Http / dynamic 运行库 -->
+  <!-- SDK 风格 net46 下需要显式引用 -->
   <ItemGroup>
+    <!-- WinForms UI -->
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Drawing" />
+
+    <!-- HttpClient -->
     <Reference Include="System.Net.Http" />
+
+    <!-- ✅ dynamic/COM 运行时 binder（解决 CS0656） -->
     <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
 
