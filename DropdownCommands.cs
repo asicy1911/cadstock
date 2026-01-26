@@ -1,9 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Reflection;
 using System.Windows.Forms;
-using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Runtime;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
@@ -11,35 +10,74 @@ using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 namespace cadstockv2
 {
     /// <summary>
-    /// 点击工具栏按钮触发的下拉菜单（用 AutoCAD 命令实现）
+    /// 点击工具栏按钮触发的下拉菜单（AutoCAD 命令）
     /// </summary>
     public class DropdownCommands
     {
+        // 保持引用：否则 Show 后立刻被 GC/Dispose 也会导致“看起来没弹”
+        private static ContextMenuStrip _menu;
+
         // 这个命令名要和 ClassicToolbarInstall 里写的一致： "_CADSTOCKV2DROPDOWN "
         [CommandMethod("CADSTOCKV2DROPDOWN")]
         public void ShowDropdown()
         {
+            Editor ed = null;
+
             try
             {
-                // 尽量保证服务在跑
-                StockQuoteService.Instance.Start();
-
-                var ed = AcApp.DocumentManager.MdiActiveDocument?.Editor;
+                var doc = AcApp.DocumentManager.MdiActiveDocument;
+                ed = doc?.Editor;
                 if (ed == null) return;
 
-                // 用 WinForms ContextMenuStrip 做菜单
-                using (var menu = BuildMenu(ed))
+                StockQuoteService.Instance.Start();
+
+                // 关掉旧菜单
+                try
                 {
-                    // 在鼠标位置弹出（WinForms 屏幕坐标）
-                    var p = Control.MousePosition;
-                    menu.Show(p);
+                    if (_menu != null)
+                    {
+                        _menu.Close();
+                        _menu.Dispose();
+                        _menu = null;
+                    }
                 }
+                catch { }
+
+                _menu = BuildMenu(ed);
+                _menu.Closed += (s, e) =>
+                {
+                    try { _menu?.Dispose(); } catch { }
+                    _menu = null;
+                };
+
+                // 延后一点点再弹（避免命令刚执行完被 AutoCAD 抢焦点导致菜单立刻关闭/不显示）
+                var pt = Control.MousePosition;
+
+                var t = new System.Windows.Forms.Timer { Interval = 1 };
+                t.Tick += (s, e) =>
+                {
+                    t.Stop();
+                    t.Dispose();
+
+                    try
+                    {
+                        var hwnd = GetAcadMainHwnd();
+                        if (hwnd != IntPtr.Zero)
+                            _menu.Show(new Win32Window(hwnd), pt); // pt 为屏幕坐标
+                        else
+                            _menu.Show(pt);
+                    }
+                    catch
+                    {
+                        try { _menu.Show(pt); } catch { }
+                    }
+                };
+                t.Start();
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
                 try
                 {
-                    var ed = AcApp.DocumentManager.MdiActiveDocument?.Editor;
                     ed?.WriteMessage("\n[cadstockv2] Dropdown failed: " + ex.GetType().Name + " - " + ex.Message);
                 }
                 catch { }
@@ -56,10 +94,10 @@ namespace cadstockv2
                 ForeColor = Color.Gainsboro
             };
 
-            // ✅ 黑色主题渲染（仅改 BackColor 有时会被系统主题覆盖）
+            // ✅ 黑色主题渲染（只改 BackColor 有时会被系统主题覆盖）
             menu.Renderer = new BlackMenuRenderer();
 
-            // 顶部标题/状态
+            // 标题/状态
             var last = StockQuoteService.Instance.LastUpdate;
             var err = StockQuoteService.Instance.LastError;
 
@@ -94,23 +132,19 @@ namespace cadstockv2
 
             if (list == null || list.Count == 0)
             {
-                var empty = new ToolStripMenuItem("暂无数据（稍等或点“立即刷新”）")
+                menu.Items.Add(new ToolStripMenuItem("暂无数据（稍等或点“立即刷新”）")
                 {
                     Enabled = false,
                     BackColor = Color.Black,
                     ForeColor = Color.Gainsboro
-                };
-                menu.Items.Add(empty);
+                });
             }
             else
             {
-                // 最多显示 25 条，避免菜单太长
                 foreach (var q in list.Take(25))
                 {
-                    var cp = q.ChangePercent; // decimal
-                    var color = cp >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
+                    var color = q.ChangePercent >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
 
-                    // 一行：名称  代码  价格
                     var text = $"{q.Name}  {q.Symbol}  {q.Price:0.00}";
                     var item = new ToolStripMenuItem(text)
                     {
@@ -118,7 +152,6 @@ namespace cadstockv2
                         ForeColor = color
                     };
 
-                    // 点击：切换关注为“只看这一只”，并立刻刷新（你想改成“加入关注”也行）
                     var sym = q.Symbol;
                     item.Click += (s, e) =>
                     {
@@ -137,7 +170,6 @@ namespace cadstockv2
 
             menu.Items.Add(new ToolStripSeparator());
 
-            // 立即刷新
             var refresh = new ToolStripMenuItem("立即刷新")
             {
                 BackColor = Color.Black,
@@ -154,7 +186,6 @@ namespace cadstockv2
             };
             menu.Items.Add(refresh);
 
-            // 打开面板（如果你有面板命令）
             var openPanel = new ToolStripMenuItem("打开面板")
             {
                 BackColor = Color.Black,
@@ -170,7 +201,6 @@ namespace cadstockv2
             };
             menu.Items.Add(openPanel);
 
-            // 退出/关闭菜单（可选）
             var close = new ToolStripMenuItem("关闭")
             {
                 BackColor = Color.Black,
@@ -181,9 +211,34 @@ namespace cadstockv2
 
             return menu;
         }
+
+        private static IntPtr GetAcadMainHwnd()
+        {
+            // 尽量兼容不同版本：MainWindow 可能是 IntPtr，也可能是对象带 Handle
+            try
+            {
+                var p = typeof(AcApp).GetProperty("MainWindow", BindingFlags.Public | BindingFlags.Static);
+                if (p == null) return IntPtr.Zero;
+
+                var v = p.GetValue(null, null);
+                if (v == null) return IntPtr.Zero;
+
+                if (v is IntPtr ip) return ip;
+
+                var hp = v.GetType().GetProperty("Handle", BindingFlags.Public | BindingFlags.Instance);
+                if (hp != null)
+                {
+                    var hv = hp.GetValue(v, null);
+                    if (hv is IntPtr hip) return hip;
+                }
+            }
+            catch { }
+
+            return IntPtr.Zero;
+        }
     }
 
-    // ---------------- 黑色主题菜单渲染 ----------------
+    // ------------- 黑色主题渲染 -------------
 
     internal sealed class BlackMenuRenderer : ToolStripProfessionalRenderer
     {
@@ -204,11 +259,10 @@ namespace cadstockv2
 
         protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
         {
-            var g = e.Graphics;
             var rect = e.Item.ContentRectangle;
             var y = rect.Top + rect.Height / 2;
             using (var p = new Pen(Color.FromArgb(60, 60, 60)))
-                g.DrawLine(p, rect.Left + 6, y, rect.Right - 6, y);
+                e.Graphics.DrawLine(p, rect.Left + 6, y, rect.Right - 6, y);
         }
     }
 
@@ -224,5 +278,11 @@ namespace cadstockv2
         public override Color MenuItemSelected => Color.FromArgb(35, 35, 35);
         public override Color MenuItemSelectedGradientBegin => Color.FromArgb(35, 35, 35);
         public override Color MenuItemSelectedGradientEnd => Color.FromArgb(35, 35, 35);
+    }
+
+    internal sealed class Win32Window : IWin32Window
+    {
+        public IntPtr Handle { get; private set; }
+        public Win32Window(IntPtr h) { Handle = h; }
     }
 }
