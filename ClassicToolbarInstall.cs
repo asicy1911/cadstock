@@ -1,6 +1,4 @@
 using System;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
@@ -8,16 +6,25 @@ namespace cadstockv2
 {
     internal static class ClassicToolbarInstall
     {
+        // ========= 方案 B：交给 CUI/工作空间，不再由 DLL 创建经典工具栏 =========
+        // 改成 true 才会再次启用“自动创建 cadstock v2 工具栏”
+        private const bool EnableClassicToolbar = false;
+
         private const string ToolbarName = "cadstock v2";
         private const string BtnName = "cadstockv2_quotes";
         private const string ESCESC = "\x03\x03";
 
         private static bool _installed;
-        private static string _bmp16;
-        private static string _bmp32;
 
         public static void InstallDeferred()
         {
+            // 方案 B：禁用创建，只负责隐藏旧工具栏
+            if (!EnableClassicToolbar)
+            {
+                HideLegacyToolbarDeferred(delete: false);
+                return;
+            }
+
             if (_installed) return;
             AcApp.Idle -= OnIdle;
             AcApp.Idle += OnIdle;
@@ -26,16 +33,86 @@ namespace cadstockv2
         private static void OnIdle(object sender, EventArgs e)
         {
             AcApp.Idle -= OnIdle;
+
+            if (!EnableClassicToolbar)
+            {
+                HideLegacyToolbar(delete: false);
+                _installed = true;
+                return;
+            }
+
             TryInstall(reset: false);
             _installed = true;
         }
 
-        public static void TryInstall(bool reset)
+        /// <summary>
+        /// 方案 B：启动后把旧的 “cadstock v2” 工具栏隐藏（或删除）
+        /// </summary>
+        public static void HideLegacyToolbarDeferred(bool delete)
+        {
+            AcApp.Idle -= OnHideIdle;
+            _pendingDelete = delete;
+            AcApp.Idle += OnHideIdle;
+        }
+
+        private static bool _pendingDelete = false;
+
+        private static void OnHideIdle(object sender, EventArgs e)
+        {
+            AcApp.Idle -= OnHideIdle;
+            HideLegacyToolbar(_pendingDelete);
+        }
+
+        /// <summary>
+        /// 隐藏（或删除）旧的经典工具栏 “cadstock v2”
+        /// </summary>
+        public static void HideLegacyToolbar(bool delete)
         {
             try
             {
-                EnsureIcons(forceRegen: false);
+                dynamic acadApp = AcApp.AcadApplication;
+                if (acadApp == null) return;
 
+                dynamic menuGroup = acadApp.MenuGroups.Item(0);
+                if (menuGroup == null) return;
+
+                dynamic toolbars = menuGroup.Toolbars;
+                if (toolbars == null) return;
+
+                dynamic tb = FindToolbar(toolbars, ToolbarName);
+                if (tb == null) return;
+
+                try
+                {
+                    if (delete)
+                    {
+                        // 删除（更彻底；下次不会再出现在工具栏列表）
+                        tb.Delete();
+                    }
+                    else
+                    {
+                        // 仅隐藏（安全；你随时还能手动显示）
+                        tb.Visible = false;
+                    }
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        // ====== 下面是旧的“自动创建工具栏”的逻辑；方案 B 默认不会走到 ======
+
+        public static void TryInstall(bool reset)
+        {
+            // 方案 B：禁用创建，只负责隐藏旧工具栏
+            if (!EnableClassicToolbar)
+            {
+                HideLegacyToolbar(delete: false);
+                return;
+            }
+
+            try
+            {
                 dynamic acadApp = AcApp.AcadApplication;
                 if (acadApp == null) { Write("AcadApplication == null"); return; }
 
@@ -56,7 +133,6 @@ namespace cadstockv2
                 if (tb == null)
                     tb = toolbars.Add(ToolbarName);
 
-                // 单按钮
                 if (!HasButton(tb, BtnName))
                 {
                     // 清理旧残留
@@ -78,16 +154,8 @@ namespace cadstockv2
                         ESCESC + "_CADSTOCKV2DROPDOWN "
                     );
 
-                    // ✅ 用 SetBitmaps 设置图标（16/32 都给）
-                    try
-                    {
-                        btn.SetBitmaps(_bmp16, _bmp32);
-                    }
-                    catch
-                    {
-                        // 有些版本只认一个，也可以同一个路径兜底
-                        try { btn.SetBitmaps(_bmp16, _bmp16); } catch { }
-                    }
+                    // 方案 B 下这里一般不会用到；保持空实现避免引用图标逻辑
+                    try { btn.SetBitmaps("", ""); } catch { }
                 }
 
                 tb.Visible = true;
@@ -130,55 +198,6 @@ namespace cadstockv2
             }
             catch { }
             return null;
-        }
-
-        private static void EnsureIcons(bool forceRegen)
-        {
-            var dir = Path.Combine(Path.GetTempPath(), "cadstockv2_icons");
-            Directory.CreateDirectory(dir);
-
-            _bmp16 = Path.Combine(dir, "main16.bmp");
-            _bmp32 = Path.Combine(dir, "main32.bmp");
-
-            if (forceRegen)
-            {
-                try { if (File.Exists(_bmp16)) File.Delete(_bmp16); } catch { }
-                try { if (File.Exists(_bmp32)) File.Delete(_bmp32); } catch { }
-            }
-
-            if (!File.Exists(_bmp16)) CreateBmp(_bmp16, 16, 16);
-            if (!File.Exists(_bmp32)) CreateBmp(_bmp32, 32, 32);
-        }
-
-        // 图标：三条线“列表”，不画倒三角；强制 32bpp，避免 Indexed
-        private static void CreateBmp(string path, int w, int h)
-        {
-            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.Clear(Color.Black);
-
-                int pad = (w <= 16) ? 1 : 2;
-                int box = w - pad - 3;
-
-                using (var pen = new Pen(Color.Gainsboro, 1))
-                    g.DrawRectangle(pen, pad, pad, box, box);
-
-                using (var brush = new SolidBrush(Color.Gainsboro))
-                {
-                    int x = pad + (w <= 16 ? 3 : 6);
-                    int y1 = pad + (w <= 16 ? 3 : 7);
-                    int barW = (w <= 16 ? 8 : 16);
-                    int barH = (w <= 16 ? 2 : 4);
-                    int gap = (w <= 16 ? 3 : 6);
-
-                    g.FillRectangle(brush, x, y1, barW, barH);
-                    g.FillRectangle(brush, x, y1 + gap, barW, barH);
-                    g.FillRectangle(brush, x, y1 + gap * 2, barW, barH);
-                }
-
-                bmp.Save(path, ImageFormat.Bmp);
-            }
         }
 
         private static void Write(string msg)
