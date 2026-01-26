@@ -20,8 +20,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cadstock
+          name: cadstockv2
           path: |
-            bin\x64\Release\net46\cadstock.dll
-            bin\x64\Release\net46\cadstock.pdb
+            bin\x64\Release\net46\cadstockv2.dll
+            bin\x64\Release\net46\cadstockv2.pdb
 
