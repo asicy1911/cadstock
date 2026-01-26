@@ -1,4 +1,5 @@
 using Autodesk.AutoCAD.Runtime;
+using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 [assembly: CommandClass(typeof(cadstockv2.Commands))]
 [assembly: CommandClass(typeof(cadstockv2.DropdownCommands))]
@@ -11,10 +12,11 @@ namespace cadstockv2
     {
         public void Initialize()
         {
-            // ✅ UI 就绪后再创建工具栏（经典界面更稳）
-            ClassicToolbarInstall.InstallDeferred();
+            // 方案 B：不再创建 “cadstock v2” 经典工具栏
+            // 只在 UI 就绪后把旧的 “cadstock v2” 工具栏自动隐藏
+            ClassicToolbarInstall.HideLegacyToolbarDeferred(delete: false);
 
-            // 可选：启动行情服务（不强制，打开菜单/面板时也会自动 start）
+            // 可选：启动行情服务（建议保留，菜单/面板会更快有数据）
             StockQuoteService.Instance.Start();
         }
 
