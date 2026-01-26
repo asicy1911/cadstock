@@ -1,0 +1,27 @@
+name: build-autocad-2018-plugin
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore + Build (Release x64)
+        shell: pwsh
+        run: |
+          msbuild .\CadIndexTicker.sln /t:Build /p:Configuration=Release /p:Platform=x64 /restore
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CadIndexTicker
+          path: |
+            **\bin\Release\*.dll
+            **\bin\Release\*.pdb
