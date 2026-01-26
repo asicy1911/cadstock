@@ -9,8 +9,8 @@ namespace cadstockv2
     {
         public void Initialize()
         {
-            // ✅ 经典界面：创建菜单栏下拉
-            ClassicMenu.TryInstall();
+            // ✅ 经典工具栏：创建“下拉（flyout）”控件
+            ClassicToolbarFlyout.TryInstall();
         }
 
         public void Terminate()
