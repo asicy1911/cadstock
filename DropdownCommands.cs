@@ -9,15 +9,11 @@ using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 namespace cadstockv2
 {
-    /// <summary>
-    /// 点击工具栏按钮触发的下拉菜单（AutoCAD 命令）
-    /// </summary>
     public class DropdownCommands
     {
-        // 保持引用：否则 Show 后立刻被 GC/Dispose 也会导致“看起来没弹”
+        // 保持引用：避免 Show 后对象被提前回收/释放
         private static ContextMenuStrip _menu;
 
-        // 这个命令名要和 ClassicToolbarInstall 里写的一致： "_CADSTOCKV2DROPDOWN "
         [CommandMethod("CADSTOCKV2DROPDOWN")]
         public void ShowDropdown()
         {
@@ -50,8 +46,8 @@ namespace cadstockv2
                     _menu = null;
                 };
 
-                // 延后一点点再弹（避免命令刚执行完被 AutoCAD 抢焦点导致菜单立刻关闭/不显示）
-                var pt = Control.MousePosition;
+                // 延后一点点再弹（避免命令/焦点抢占）
+                var screenPt = Control.MousePosition;
 
                 var t = new System.Windows.Forms.Timer { Interval = 1 };
                 t.Tick += (s, e) =>
@@ -61,20 +57,29 @@ namespace cadstockv2
 
                     try
                     {
-                        var hwnd = GetAcadMainHwnd();
-                        if (hwnd != IntPtr.Zero)
-                            _menu.Show(new Win32Window(hwnd), pt); // pt 为屏幕坐标
-                        else
-                            _menu.Show(pt);
+                        // ✅ 用一个临时宿主控件作为 owner（Show(Control, Point)）
+                        using (var host = CreateOwnerHostControl())
+                        {
+                            if (host != null && !host.IsDisposed)
+                            {
+                                // Show(Control, Point) 的 Point 是相对于该 Control 的坐标
+                                var clientPt = host.PointToClient(screenPt);
+                                _menu.Show(host, clientPt);
+                            }
+                            else
+                            {
+                                _menu.Show(screenPt); // 兜底：屏幕坐标
+                            }
+                        }
                     }
                     catch
                     {
-                        try { _menu.Show(pt); } catch { }
+                        try { _menu.Show(screenPt); } catch { }
                     }
                 };
                 t.Start();
             }
-            catch (Exception ex)
+            catch (System.Exception ex)
             {
                 try
                 {
@@ -94,20 +99,18 @@ namespace cadstockv2
                 ForeColor = Color.Gainsboro
             };
 
-            // ✅ 黑色主题渲染（只改 BackColor 有时会被系统主题覆盖）
+            // ✅ 黑色主题渲染（防止系统主题覆盖）
             menu.Renderer = new BlackMenuRenderer();
 
-            // 标题/状态
             var last = StockQuoteService.Instance.LastUpdate;
             var err = StockQuoteService.Instance.LastError;
 
-            var title = new ToolStripMenuItem("cadstock v2")
+            menu.Items.Add(new ToolStripMenuItem("cadstock v2")
             {
                 Enabled = false,
                 BackColor = Color.Black,
                 ForeColor = Color.Gainsboro
-            };
-            menu.Items.Add(title);
+            });
 
             string status;
             if (last.HasValue)
@@ -117,17 +120,15 @@ namespace cadstockv2
             else
                 status = "未更新";
 
-            var stat = new ToolStripMenuItem(status)
+            menu.Items.Add(new ToolStripMenuItem(status)
             {
                 Enabled = false,
                 BackColor = Color.Black,
                 ForeColor = Color.Gainsboro
-            };
-            menu.Items.Add(stat);
+            });
 
             menu.Items.Add(new ToolStripSeparator());
 
-            // 行情列表
             var list = StockQuoteService.Instance.GetSnapshot();
 
             if (list == null || list.Count == 0)
@@ -144,15 +145,14 @@ namespace cadstockv2
                 foreach (var q in list.Take(25))
                 {
                     var color = q.ChangePercent >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
-
                     var text = $"{q.Name}  {q.Symbol}  {q.Price:0.00}";
+
+                    var sym = q.Symbol;
                     var item = new ToolStripMenuItem(text)
                     {
                         BackColor = Color.Black,
                         ForeColor = color
                     };
-
-                    var sym = q.Symbol;
                     item.Click += (s, e) =>
                     {
                         try
@@ -212,9 +212,53 @@ namespace cadstockv2
             return menu;
         }
 
+        /// <summary>
+        /// 创建一个临时宿主控件，挂到 AutoCAD 主窗口上，用作 ContextMenuStrip.Show(Control, Point) 的 owner。
+        /// </summary>
+        private static Control CreateOwnerHostControl()
+        {
+            try
+            {
+                var hwnd = GetAcadMainHwnd();
+                if (hwnd == IntPtr.Zero) return null;
+
+                // Control.FromHandle：拿到主窗口的 WinForms 包装（可能为 null，取决于宿主）
+                var owner = Control.FromHandle(hwnd);
+
+                if (owner != null) return owner;
+
+                // 如果 FromHandle 拿不到，就创建一个极小的透明控件并设置 Parent = 从句柄创建的 NativeWindow 包装不了，
+                // 这里退化：用一个隐藏 Form 作为 owner（最稳）
+                var f = new Form
+                {
+                    ShowInTaskbar = false,
+                    FormBorderStyle = FormBorderStyle.None,
+                    StartPosition = FormStartPosition.Manual,
+                    Size = new Size(1, 1),
+                    Opacity = 0,
+                    TopMost = false
+                };
+
+                // 尝试把它设为 AutoCAD 主窗的 owned form（Win32 级别）
+                // 注意：不强依赖，失败就当普通隐藏窗
+                try
+                {
+                    var mi = typeof(Form).GetMethod("SetDesktopLocation", BindingFlags.Instance | BindingFlags.Public);
+                    mi?.Invoke(f, new object[] { -32000, -32000 });
+                }
+                catch { }
+
+                f.Show();
+                return f;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static IntPtr GetAcadMainHwnd()
         {
-            // 尽量兼容不同版本：MainWindow 可能是 IntPtr，也可能是对象带 Handle
             try
             {
                 var p = typeof(AcApp).GetProperty("MainWindow", BindingFlags.Public | BindingFlags.Static);
@@ -238,7 +282,7 @@ namespace cadstockv2
         }
     }
 
-    // ------------- 黑色主题渲染 -------------
+    // ---------------- 黑色菜单渲染 ----------------
 
     internal sealed class BlackMenuRenderer : ToolStripProfessionalRenderer
     {
@@ -278,11 +322,5 @@ namespace cadstockv2
         public override Color MenuItemSelected => Color.FromArgb(35, 35, 35);
         public override Color MenuItemSelectedGradientBegin => Color.FromArgb(35, 35, 35);
         public override Color MenuItemSelectedGradientEnd => Color.FromArgb(35, 35, 35);
-    }
-
-    internal sealed class Win32Window : IWin32Window
-    {
-        public IntPtr Handle { get; private set; }
-        public Win32Window(IntPtr h) { Handle = h; }
     }
 }
