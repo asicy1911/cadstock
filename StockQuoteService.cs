@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -61,7 +62,7 @@ namespace cadstockv2
 
                 if (_timer == null)
                 {
-                    // 立即跑一次，然后每 10 秒刷新（你也可以改成 5 秒）
+                    // 立即跑一次，然后每 10 秒刷新
                     _timer = new Timer(async _ => await TickSafeAsync().ConfigureAwait(false), null, 0, 10_000);
                 }
 
@@ -101,7 +102,7 @@ namespace cadstockv2
             }
         }
 
-        /// <summary>取单只（给 Dropdown/Palette 可能会用）</summary>
+        /// <summary>取单只（可选）</summary>
         public StockQuote GetSnapshot(string symbol)
         {
             symbol = NormalizeSymbol(symbol);
@@ -241,16 +242,23 @@ namespace cadstockv2
 
         private static string DecodeSina(byte[] bytes)
         {
+            if (bytes == null || bytes.Length == 0) return "";
+
             try
             {
-                // net46 一般自带 936（GBK）
+                // 优先 GBK(936)
                 return Encoding.GetEncoding(936).GetString(bytes);
             }
-            catch
+            catch { }
+
+            try
             {
-                // 兜底
-                return Encoding.UTF8.GetString(bytes);
+                // 兜底 GB2312
+                return Encoding.GetEncoding("gb2312").GetString(bytes);
             }
+            catch { }
+
+            return Encoding.UTF8.GetString(bytes);
         }
 
         private List<StockQuote> ParseSinaResponse(string text)
@@ -293,7 +301,6 @@ namespace cadstockv2
                 // 1 今开
                 // 2 昨收
                 // 3 现价
-                // ... 最后一般是 日期、时间（A股通常 fields[30]=date, [31]=time）
                 if (fields.Length < 4) continue;
 
                 var name = fields[0];
@@ -303,7 +310,6 @@ namespace cadstockv2
                 // code -> 6位数字 symbol
                 var symbol = NormalizeSymbol(code);
 
-                // 如果 price 为 0，可能停牌/非交易时段/返回异常，仍然保留但不算 ok
                 var q = new StockQuote
                 {
                     Symbol = symbol,
@@ -319,9 +325,16 @@ namespace cadstockv2
             {
                 lock (_lock)
                 {
-                    // 记录部分原文便于你调试（不要太长）
-                    LastError = "Sina 解析为 0 条。可能被拦/返回格式变化。响应前 120 字："
-                                + (text.Length > 120 ? text.Substring(0, 120) : text);
+                    if (text.IndexOf("hq_str_", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        LastError = "Sina 返回内容不像行情文本（可能被拦/跳转/返回 HTML）。前 180 字："
+                                    + (text.Length > 180 ? text.Substring(0, 180) : text);
+                    }
+                    else
+                    {
+                        LastError = "Sina 解析为 0 条（可能股票代码无效或都返回空串）。前 180 字："
+                                    + (text.Length > 180 ? text.Substring(0, 180) : text);
+                    }
                 }
             }
 
@@ -334,7 +347,13 @@ namespace cadstockv2
             {
                 if (idx < 0 || idx >= fields.Length) return 0m;
                 decimal v;
+
+                // 优先用 InvariantCulture，避免不同系统的小数点/逗号导致解析失败
+                if (decimal.TryParse(fields[idx], NumberStyles.Any, CultureInfo.InvariantCulture, out v)) return v;
+
+                // 兜底：系统默认
                 if (decimal.TryParse(fields[idx], out v)) return v;
+
                 return 0m;
             }
             catch { return 0m; }
