@@ -115,21 +115,39 @@ namespace cadstockv2
         }
 
         public void SetSymbols(IEnumerable<string> symbols)
+{
+    lock (_lock)
+    {
+        // 1) 生成新列表
+        var newList = (symbols ?? Enumerable.Empty<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(NormalizeSymbol)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _symbols.Clear();
+        _symbols.AddRange(newList);
+
+        // 2) ✅ 关键：把 _latest 里不在 _symbols 的旧缓存清掉
+        var keep = new HashSet<string>(_symbols, StringComparer.OrdinalIgnoreCase);
+        var removeKeys = _latest.Keys.Where(k => !keep.Contains(k)).ToList();
+        foreach (var k in removeKeys) _latest.Remove(k);
+
+        // 3) 如果清空了列表，也顺便清状态（可选但更直观）
+        if (_symbols.Count == 0)
         {
-            lock (_lock)
-            {
-                _symbols.Clear();
-                _symbols.AddRange(symbols
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Select(NormalizeSymbol)
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Distinct(StringComparer.OrdinalIgnoreCase));
-
-                SaveSymbols();
-            }
-
-            ForceRefresh();
+            _latest.Clear();
+            LastUpdate = null;
+            LastError = "股票列表为空（symbols=0）。";
         }
+
+        SaveSymbols();
+    }
+
+    ForceRefresh();
+}
+
 
         private async Task TickSafeAsync()
         {
