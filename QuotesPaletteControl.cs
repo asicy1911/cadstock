@@ -1,7 +1,5 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
-using System.Linq;
 using System.Windows.Forms;
 
 namespace cadstockv2
@@ -10,7 +8,6 @@ namespace cadstockv2
     {
         private readonly DataGridView _grid;
         private readonly Label _top;
-        private List<string> _symbols = new List<string>();
 
         public QuotesPaletteControl()
         {
@@ -52,42 +49,20 @@ namespace cadstockv2
             _grid.DefaultCellStyle.SelectionForeColor = Color.Gainsboro;
 
             // ✅ 只保留：名称 / 涨跌幅
-            _grid.Columns.Clear();
-            _grid.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                Name = "Name",
-                HeaderText = "名称",
-                SortMode = DataGridViewColumnSortMode.NotSortable
-            });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                Name = "Chg",
-                HeaderText = "涨跌幅",
-                SortMode = DataGridViewColumnSortMode.NotSortable
-            });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "名称" });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Change", HeaderText = "涨跌幅" });
 
             Controls.Add(_grid);
             Controls.Add(_top);
 
-            // 双击：把这只设为唯一关注（不想这样我再给你改）
+            // 双击：只看这一只（可选）
             _grid.CellDoubleClick += (s, e) =>
             {
                 if (e.RowIndex < 0) return;
                 var sym = _grid.Rows[e.RowIndex].Tag as string;
                 if (!string.IsNullOrWhiteSpace(sym))
-                {
-                    StockQuoteService.Instance.SetSymbols(new[] { sym });
-                }
+                    PaletteHost.ApplySymbols(new[] { sym });
             };
-
-            SafeReloadFromService();
-        }
-
-        public void SetSymbols(string[] symbols)
-        {
-            _symbols = (symbols ?? Array.Empty<string>())
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .ToList();
 
             SafeReloadFromService();
         }
@@ -102,51 +77,30 @@ namespace cadstockv2
                 return;
             }
 
-            var list = StockQuoteService.Instance.GetSnapshot();
+            var list = StockQuoteService.Instance.GetSnapshot(out var last);
 
-            // 按当前关注顺序排列
-            if (_symbols.Count > 0)
-            {
-                var map = list.ToDictionary(x => x.Symbol, x => x);
-                list = _symbols.Where(map.ContainsKey).Select(s => map[s]).ToList();
-            }
-
-            var last = StockQuoteService.Instance.LastUpdate;
-            _top.Text = last.HasValue
-                ? $"cadstock v2（{last.Value:HH:mm:ss}）"
-                : "cadstock v2（未更新）";
+            _top.Text = last == DateTime.MinValue
+                ? "cadstock v2（未更新）"
+                : $"cadstock v2（{last:HH:mm:ss}）";
 
             _grid.Rows.Clear();
 
             foreach (var q in list)
             {
-                string chgText;
-                Color chgColor;
-                GetChangeTextAndColor(q, out chgText, out chgColor);
+                bool hasData = (q.PrevClose != 0m && q.Price != 0m);
+                var cp = q.ChangePercent;
 
-                int r = _grid.Rows.Add(q.Name, chgText);
+                string pctText = hasData
+                    ? (cp >= 0 ? "+" : "") + cp.ToString("0.00") + "%"
+                    : "--";
+
+                int r = _grid.Rows.Add(q.Name, pctText);
                 var row = _grid.Rows[r];
                 row.Tag = q.Symbol;
 
-                // 只给“涨跌幅”着色
-                row.Cells["Chg"].Style.ForeColor = chgColor;
+                var color = !hasData ? Color.Gainsboro : (cp >= 0 ? Color.IndianRed : Color.MediumSeaGreen);
+                row.Cells["Change"].Style.ForeColor = color;
             }
-        }
-
-        private static void GetChangeTextAndColor(StockQuote q, out string text, out Color color)
-        {
-            // 没有昨收/现价（或为 0）就视为未知
-            if (q == null || q.PrevClose <= 0m || q.Price <= 0m)
-            {
-                text = "—";
-                color = Color.Gainsboro;
-                return;
-            }
-
-            // ChangePercent 是 decimal（不是 nullable）
-            var cp = q.ChangePercent; // 1.23 表示 1.23%
-            text = (cp >= 0 ? "+" : "") + cp.ToString("0.00") + "%";
-            color = cp >= 0 ? Color.IndianRed : Color.MediumSeaGreen;
         }
     }
 }
