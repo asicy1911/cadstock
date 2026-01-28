@@ -1,5 +1,4 @@
 using Autodesk.AutoCAD.Runtime;
-using AcApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 [assembly: CommandClass(typeof(cadstockv2.Commands))]
 [assembly: CommandClass(typeof(cadstockv2.DropdownCommands))]
@@ -12,16 +11,26 @@ namespace cadstockv2
     {
         public void Initialize()
         {
-            // 方案 B：不再创建 “cadstock v2” 经典工具栏
-            // 只在 UI 就绪后把旧的 “cadstock v2” 工具栏自动隐藏
-            ClassicToolbarInstall.HideLegacyToolbarDeferred(delete: true);
+            // ✅ 方案 B：工具栏由 CUI/工作空间管理，所以不再自动创建“cadstock v2”经典工具栏
+            // ClassicToolbarInstall.InstallDeferred();
 
-            // 可选：启动行情服务（建议保留，菜单/面板会更快有数据）
+            // ✅ 关键：订阅行情更新事件，让面板能自动刷新
+            // 防止 NETLOAD/重复加载导致重复订阅：先 -= 再 +=
+            StockQuoteService.Instance.DataUpdated -= PaletteHost.NotifyQuotesUpdated;
+            StockQuoteService.Instance.DataUpdated += PaletteHost.NotifyQuotesUpdated;
+
+            // 可选：启动行情服务（不强制，点菜单/打开面板时也会自动 Start）
             StockQuoteService.Instance.Start();
         }
 
         public void Terminate()
         {
+            try
+            {
+                StockQuoteService.Instance.DataUpdated -= PaletteHost.NotifyQuotesUpdated;
+            }
+            catch { }
+
             StockQuoteService.Instance.Stop();
             PaletteHost.DisposePalette();
         }
