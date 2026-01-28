@@ -16,10 +16,11 @@ namespace cadstockv2
         }
 
         [CommandMethod("CADSTOCKV2REFRESH")]
-        public void CADSTOCKV2REFRESH()
-        {
-            StockQuoteService.Instance.ForceRefresh();
-        }
+public void CADSTOCKV2REFRESH()
+{
+    StockQuoteService.Instance.ReloadSymbolsFromDisk(forceRefresh: true);
+}
+
 
         [CommandMethod("CADSTOCKV2STOP")]
         public void CADSTOCKV2STOP()
