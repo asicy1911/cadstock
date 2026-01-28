@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -16,11 +17,11 @@ namespace cadstockv2
         }
 
         [CommandMethod("CADSTOCKV2REFRESH")]
-public void CADSTOCKV2REFRESH()
-{
-    StockQuoteService.Instance.ReloadSymbolsFromDisk(forceRefresh: true);
-}
-
+        public void CADSTOCKV2REFRESH()
+        {
+            // ✅ 重读 txt + 立刻刷新列表 + 强制拉取
+            StockQuoteService.Instance.ReloadSymbolsFromDisk(forceRefresh: true);
+        }
 
         [CommandMethod("CADSTOCKV2STOP")]
         public void CADSTOCKV2STOP()
@@ -29,11 +30,10 @@ public void CADSTOCKV2REFRESH()
             PaletteHost.HidePalette();
         }
 
-        // ✅ 设置/增删股票（不需要 CADSTOCKV2PALETTE）
-        // 用法：
-        // 1) 输入 "600000,000001" => 覆盖式设置（基于当前列表增补/删除）
-        // 2) 删除：输入 "-600000 -000001"
-        // 3) 清空：输入 "-" 或 "clear"
+        // CADSTOCKV2SET
+        // - 输入 "sh000001,600000,000001" => 覆盖设置（按输入顺序）
+        // - 增删模式：带 - 号，例如： "-600519 600900"
+        // - 清空：输入 "-" 或 "clear"
         [CommandMethod("CADSTOCKV2SET")]
         public void CADSTOCKV2SET()
         {
@@ -45,18 +45,13 @@ public void CADSTOCKV2REFRESH()
             {
                 StockQuoteService.Instance.Start();
 
-                // 当前列表（默认值）
-                var current = StockQuoteService.Instance.GetSnapshot()
-                    .Select(q => q.Symbol)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
+                var current = StockQuoteService.Instance.GetSymbols();
                 var defaultText = current.Count > 0
                     ? string.Join(",", current)
-                    : "600000,000001,600519";
+                    : "sh600000,sz000001,sh600519";
 
                 var pso = new PromptStringOptions(
-                    "\n输入股票代码：新增 600000；删除 -600000；清空输入 - 或 clear：")
+                    "\n输入股票代码：覆盖输入 600000,sh000001；增删模式用 -600000；清空输入 - 或 clear：")
                 {
                     AllowSpaces = true,
                     DefaultValue = defaultText,
@@ -73,7 +68,6 @@ public void CADSTOCKV2REFRESH()
                     return;
                 }
 
-                // 清空全部
                 if (input == "-" || input.Equals("clear", StringComparison.OrdinalIgnoreCase))
                 {
                     PaletteHost.ApplySymbols(Array.Empty<string>());
@@ -81,54 +75,61 @@ public void CADSTOCKV2REFRESH()
                     return;
                 }
 
-                // token: 逗号/空格/换行/分号
                 var tokens = input.Split(new[] { ',', '，', ';', '；', ' ', '\t', '\r', '\n' },
                                          StringSplitOptions.RemoveEmptyEntries);
 
-                // 规范化（与 StockQuoteService 的 NormalizeSymbol 保持一致的最小实现）
-                Func<string, string> norm = s =>
+                bool hasRemoveToken = tokens.Any(t => (t ?? "").TrimStart().StartsWith("-", StringComparison.Ordinal));
+
+                List<string> finalList;
+
+                if (!hasRemoveToken)
                 {
-                    s = (s ?? "").Trim();
-                    if (s.Length >= 2)
+                    // ✅ 覆盖式设置（顺序按输入）
+                    finalList = new List<string>();
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var t0 in tokens)
                     {
-                        var p = s.Substring(0, 2);
-                        if (p.Equals("sh", StringComparison.OrdinalIgnoreCase) ||
-                            p.Equals("sz", StringComparison.OrdinalIgnoreCase))
-                            s = s.Substring(2);
+                        var sym = StockQuoteService.NormalizeSymbol(t0);
+                        if (string.IsNullOrWhiteSpace(sym)) continue;
+                        if (seen.Add(sym)) finalList.Add(sym);
                     }
-                    if (s.Length > 2 && s[1] == '.' && (s[0] == '0' || s[0] == '1'))
-                        s = s.Substring(2);
-                    return s.Trim();
-                };
-
-                var set = new System.Collections.Generic.HashSet<string>(
-                    current.Where(x => !string.IsNullOrWhiteSpace(x)).Select(norm),
-                    StringComparer.OrdinalIgnoreCase
-                );
-
-                foreach (var t0 in tokens)
+                }
+                else
                 {
-                    var t = (t0 ?? "").Trim();
-                    if (t.Length == 0) continue;
+                    // ✅ 增删模式：在当前列表上操作，新增追加到末尾
+                    finalList = new List<string>(current);
+                    var set = new HashSet<string>(finalList, StringComparer.OrdinalIgnoreCase);
 
-                    bool isRemove = t.StartsWith("-");
-                    if (isRemove) t = t.Substring(1).Trim();
-                    if (t.Length == 0) continue;
+                    foreach (var t00 in tokens)
+                    {
+                        var t = (t00 ?? "").Trim();
+                        if (t.Length == 0) continue;
 
-                    var sym = norm(t);
-                    if (string.IsNullOrWhiteSpace(sym)) continue;
+                        bool isRemove = t.StartsWith("-", StringComparison.Ordinal);
+                        if (isRemove) t = t.Substring(1).Trim();
+                        if (t.Length == 0) continue;
 
-                    if (isRemove) set.Remove(sym);
-                    else set.Add(sym);
+                        var sym = StockQuoteService.NormalizeSymbol(t);
+                        if (string.IsNullOrWhiteSpace(sym)) continue;
+
+                        if (isRemove)
+                        {
+                            if (set.Remove(sym))
+                                finalList.RemoveAll(x => x.Equals(sym, StringComparison.OrdinalIgnoreCase));
+                        }
+                        else
+                        {
+                            if (set.Add(sym))
+                                finalList.Add(sym);
+                        }
+                    }
                 }
 
-                var finalSyms = set.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
-
-                PaletteHost.ApplySymbols(finalSyms);
-                StockQuoteService.Instance.ForceRefresh();
+                PaletteHost.ApplySymbols(finalList.ToArray());
 
                 ed.WriteMessage("\n[cadstockv2] 当前股票列表： " +
-                                (finalSyms.Length == 0 ? "(空)" : string.Join(", ", finalSyms)));
+                                (finalList.Count == 0 ? "(空)" : string.Join(", ", finalList)));
             }
             catch (System.Exception ex)
             {
