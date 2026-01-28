@@ -4,46 +4,32 @@ namespace cadstockv2
 {
     public class EntryPoint : IExtensionApplication
     {
-        private bool _hooked;
-
         public void Initialize()
         {
-            // ✅ 不等 Idle，直接挂上更新事件，避免“面板不刷新”
-            TryHook();
+            // 方案B：CUI 工具栏 + 下拉菜单
+            ClassicToolbarInstall.InstallDeferred();
+            DropdownCommands.Install();
+
+            // ✅ 启动行情服务
+            StockQuoteService.Instance.Start();
+
+            // ✅ 面板自动刷新（关键：没有这句，面板就不会跟着更新）
+            StockQuoteService.Instance.DataUpdated += PaletteHost.NotifyQuotesUpdated;
+
+            // 进来先触发一次，让面板/菜单第一次打开就有东西
+            StockQuoteService.Instance.ForceRefresh();
         }
 
         public void Terminate()
         {
             try
             {
-                if (_hooked)
-                {
-                    StockQuoteService.Instance.DataUpdated -= OnUpdated;
-                    _hooked = false;
-                }
+                StockQuoteService.Instance.DataUpdated -= PaletteHost.NotifyQuotesUpdated;
             }
             catch { }
 
-            try { StockQuoteService.Instance.Stop(); } catch { }
-            try { PaletteHost.DisposePalette(); } catch { }
-        }
-
-        private void TryHook()
-        {
-            if (_hooked) return;
-            _hooked = true;
-
-            try
-            {
-                StockQuoteService.Instance.DataUpdated += OnUpdated;
-            }
-            catch { }
-        }
-
-        private static void OnUpdated()
-        {
-            // ✅ 统一走 PaletteHost（内部会处理跨线程刷新）
-            try { PaletteHost.NotifyQuotesUpdated(); } catch { }
+            StockQuoteService.Instance.Stop();
+            PaletteHost.DisposePalette();
         }
     }
 }
