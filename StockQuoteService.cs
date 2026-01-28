@@ -16,14 +16,13 @@ namespace cadstockv2
 
         private readonly object _lock = new object();
 
-        // ✅ 内部统一保存为 Sina 代码：sh600000 / sz000001 / sh000001(上证指数) ...
+        // ✅ 统一存“规范化后的代码”：sh600000 / sz000001 / sh000001(上证指数)
         private readonly List<string> _symbols = new List<string>();
         private readonly Dictionary<string, StockQuote> _latest =
             new Dictionary<string, StockQuote>(StringComparer.OrdinalIgnoreCase);
 
         private Timer _timer;
         private HttpClient _http;
-
         private int _tickRunning = 0;
 
         public DateTime? LastUpdate { get; private set; }
@@ -31,11 +30,9 @@ namespace cadstockv2
 
         public event Action DataUpdated;
 
-        // 刷新周期（毫秒）——你要改刷新频率就改这里，例如 5000 = 5 秒
-        private const int RefreshIntervalMs = 10_000;
-
         private StockQuoteService()
         {
+            // ✅ 强制开启 TLS1.2
             try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
         }
 
@@ -43,19 +40,29 @@ namespace cadstockv2
         {
             lock (_lock)
             {
-                EnsureHttp_NoLock();
+                if (_http == null)
+                {
+                    var handler = new HttpClientHandler
+                    {
+                        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+                    };
+                    _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(6) };
+
+                    _http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) cadstockv2");
+                    try { _http.DefaultRequestHeaders.Referrer = new Uri("https://finance.sina.com.cn/"); } catch { }
+                }
 
                 if (_timer == null)
                 {
-                    // 立即跑一次，然后每 RefreshIntervalMs 刷新
-                    _timer = new Timer(async _ => await TickSafeAsync().ConfigureAwait(false), null, 0, RefreshIntervalMs);
+                    // ✅ 刷新周期就在这里：10_000 = 10秒（改成 5_000 就是 5秒）
+                    _timer = new Timer(async _ => await TickSafeAsync().ConfigureAwait(false),
+                        null, 0, 10_000);
                 }
 
-                // 第一次启动加载 symbols
                 if (_symbols.Count == 0)
                 {
-                    LoadSymbolsFromDisk_NoLock(useDefaultsIfEmpty: true, saveIfDefaultInserted: true);
-                    CleanupLatest_NoLock();
+                    LoadSymbols(allowDefaultIfMissing: true);
                 }
             }
         }
@@ -71,49 +78,53 @@ namespace cadstockv2
             }
         }
 
-        /// <summary>
-        /// ✅ 重新从 txt 加载股票列表（用于：你手工编辑 txt 后，执行 CADSTOCKV2REFRESH 立即生效）
-        /// </summary>
-        public void ReloadSymbolsFromDisk(bool forceRefresh = true)
-        {
-            lock (_lock)
-            {
-                LoadSymbolsFromDisk_NoLock(useDefaultsIfEmpty: true, saveIfDefaultInserted: false);
-                CleanupLatest_NoLock();
-            }
-
-            // 先通知 UI：让移除的股票立刻消失（即便网络还没刷新回来）
-            FireUpdated();
-
-            if (forceRefresh) ForceRefresh();
-        }
-
-        /// <summary>强制立刻刷新一次（不阻塞 UI）</summary>
+        /// <summary>强制立刻刷新一次</summary>
         public void ForceRefresh()
         {
-            // 确保已初始化 HttpClient（否则只调用 REFRESH 时会 NRE）
-            Start();
             Task.Run(async () => await TickSafeAsync().ConfigureAwait(false));
         }
 
-        /// <summary>面板/下拉菜单用：按 symbols 顺序输出</summary>
+        /// <summary>给 UI / 命令用：取当前 symbols（按顺序）</summary>
+        public List<string> GetSymbols()
+        {
+            lock (_lock) return _symbols.ToList();
+        }
+
+        /// <summary>面板/下拉菜单用：按 symbols 顺序输出；缺数据也会给占位，保证“列表”立刻变化</summary>
         public List<StockQuote> GetSnapshot()
         {
             lock (_lock)
             {
-                var result = new List<StockQuote>();
+                var result = new List<StockQuote>(_symbols.Count);
 
                 for (int i = 0; i < _symbols.Count; i++)
                 {
                     var s = _symbols[i];
-                    if (_latest.TryGetValue(s, out var q) && q != null)
+                    StockQuote q;
+                    if (_latest.TryGetValue(s, out q) && q != null)
                         result.Add(q);
+                    else
+                        result.Add(new StockQuote
+                        {
+                            Symbol = s,
+                            Name = s,      // 没数据时先显示代码
+                            Price = 0m,
+                            PrevClose = 0m
+                        });
                 }
 
                 return result;
             }
         }
 
+        /// <summary>兼容你现有 DropdownCommands：顺带拿 LastUpdate</summary>
+        public List<StockQuote> GetSnapshot(out DateTime last)
+        {
+            lock (_lock) last = LastUpdate ?? DateTime.MinValue;
+            return GetSnapshot();
+        }
+
+        /// <summary>取单只</summary>
         public StockQuote GetSnapshot(string symbol)
         {
             symbol = NormalizeSymbol(symbol);
@@ -121,60 +132,61 @@ namespace cadstockv2
 
             lock (_lock)
             {
-                return _latest.TryGetValue(symbol, out var q) ? q : null;
+                StockQuote q;
+                if (_latest.TryGetValue(symbol, out q)) return q;
+                return null;
             }
         }
 
-        public IReadOnlyList<string> GetSymbols()
-        {
-            lock (_lock) return _symbols.ToList();
-        }
-
+        /// <summary>
+        /// 设置股票列表（会保存到 txt），并立即触发 UI 刷新 + 拉取
+        /// </summary>
         public void SetSymbols(IEnumerable<string> symbols)
         {
             lock (_lock)
             {
                 _symbols.Clear();
 
-                // ✅ 支持：sh600000 / sz000001 / 600000 / 0.000001 / 1.600000 / 600000.SH 等
-                var list = (symbols ?? Array.Empty<string>())
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Select(NormalizeSymbol)
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .ToList();
-
-                // 去重但保序
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var s in list)
+                foreach (var s0 in (symbols ?? Array.Empty<string>()))
                 {
-                    if (seen.Add(s))
+                    var s = NormalizeSymbol(s0);
+                    if (string.IsNullOrWhiteSpace(s)) continue;
+                    if (!_symbols.Contains(s, StringComparer.OrdinalIgnoreCase))
                         _symbols.Add(s);
                 }
 
                 CleanupLatest_NoLock();
-                SaveSymbols_NoLock();
+                SaveSymbols();
             }
 
-            FireUpdated();
-            ForceRefresh();
+            FireUpdated();   // 先让 UI 立刻“列表变化”
+            ForceRefresh();  // 再异步拉取行情
         }
 
-        private void EnsureHttp_NoLock()
+        /// <summary>
+        /// ✅ 手动编辑 txt 后调用它：重新读取 symbols，并可选择是否强制拉取
+        /// </summary>
+        public void ReloadSymbolsFromDisk(bool forceRefresh)
         {
-            if (_http != null) return;
-
-            var handler = new HttpClientHandler
+            lock (_lock)
             {
-                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
-            };
+                LoadSymbols(allowDefaultIfMissing: true);
+                CleanupLatest_NoLock();
+            }
 
-            _http = new HttpClient(handler)
+            FireUpdated();          // 立刻让面板/下拉“列表”更新
+            if (forceRefresh) ForceRefresh();
+        }
+
+        private void CleanupLatest_NoLock()
+        {
+            var keep = new HashSet<string>(_symbols, StringComparer.OrdinalIgnoreCase);
+            var keys = _latest.Keys.ToList();
+            foreach (var k in keys)
             {
-                Timeout = TimeSpan.FromSeconds(6)
-            };
-
-            _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) cadstockv2");
-            try { _http.DefaultRequestHeaders.Referrer = new Uri("https://finance.sina.com.cn/"); } catch { }
+                if (!keep.Contains(k))
+                    _latest.Remove(k);
+            }
         }
 
         private async Task TickSafeAsync()
@@ -203,10 +215,7 @@ namespace cadstockv2
         private async Task TickAsync()
         {
             List<string> list;
-            lock (_lock)
-            {
-                list = _symbols.ToList();
-            }
+            lock (_lock) list = _symbols.ToList();
 
             if (list.Count == 0)
             {
@@ -219,8 +228,8 @@ namespace cadstockv2
                 return;
             }
 
-            // ✅ 一次最多 50 个，避免限流
-            var batch = list.Take(50).Select(ToSinaCode).ToList();
+            // 一次最多 50 个，避免被限流
+            var batch = list.Take(50).Select(ToSinaCode).Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
             var url = "https://hq.sinajs.cn/list=" + string.Join(",", batch);
 
             string text;
@@ -284,7 +293,7 @@ namespace cadstockv2
 
         private static string DecodeSina(byte[] bytes)
         {
-            try { return Encoding.GetEncoding(936).GetString(bytes); }
+            try { return Encoding.GetEncoding(936).GetString(bytes); }  // GBK
             catch { return Encoding.UTF8.GetString(bytes); }
         }
 
@@ -307,7 +316,7 @@ namespace cadstockv2
                 if (eq <= 0) continue;
 
                 var key = line.Substring("var ".Length, eq - "var ".Length).Trim(); // hq_str_sh600000
-                var code = key.Replace("hq_str_", "").Trim(); // sh600000
+                var code = key.Replace("hq_str_", "").Trim();                         // sh600000
 
                 int q1 = line.IndexOf('"', eq);
                 if (q1 < 0) continue;
@@ -315,7 +324,8 @@ namespace cadstockv2
                 if (q2 <= q1) continue;
 
                 var payload = line.Substring(q1 + 1, q2 - q1 - 1);
-                if (string.IsNullOrWhiteSpace(payload)) continue;
+                if (string.IsNullOrWhiteSpace(payload))
+                    continue;
 
                 var fields = payload.Split(',');
                 if (fields.Length < 4) continue;
@@ -324,7 +334,6 @@ namespace cadstockv2
                 decimal prev = ParseDecimal(fields, 2);
                 decimal price = ParseDecimal(fields, 3);
 
-                // ✅ 这里 Symbol 也用带前缀的 canonical
                 var symbol = NormalizeSymbol(code);
                 if (string.IsNullOrWhiteSpace(symbol)) continue;
 
@@ -354,67 +363,62 @@ namespace cadstockv2
             try
             {
                 if (idx < 0 || idx >= fields.Length) return 0m;
-                return decimal.TryParse(fields[idx], out var v) ? v : 0m;
+                decimal v;
+                if (decimal.TryParse(fields[idx], out v)) return v;
+                return 0m;
             }
             catch { return 0m; }
         }
 
         /// <summary>
-        /// ✅ 规范化为 Sina 代码（shxxxxxx / szxxxxxx）
-        /// - 支持：sh600000 / sz000001
-        /// - 支持：600000（自动推断；指数请显式写 sh000001）
-        /// - 支持：1.600000 / 0.000001（东财 secid）
-        /// - 支持：600000.SH / 000001.SZ
+        /// ✅ 关键：规范化为 shXXXXXX / szXXXXXX
+        /// 支持输入：600000、sh600000、SZ000001、1.600000、0.000001
+        /// 不带前缀时：6/5/9 开头=>sh，其它=>sz
         /// </summary>
-        private static string NormalizeSymbol(string s)
+        internal static string NormalizeSymbol(string s)
         {
             s = (s ?? "").Trim();
-            if (s.Length == 0) return null;
+            if (s.Length == 0) return "";
 
-            // 后缀形式：600000.SH / 000001.SZ
-            if (s.EndsWith(".SH", StringComparison.OrdinalIgnoreCase))
-                s = "sh" + s.Substring(0, s.Length - 3);
-            else if (s.EndsWith(".SZ", StringComparison.OrdinalIgnoreCase))
-                s = "sz" + s.Substring(0, s.Length - 3);
+            string prefix = null;
 
-            // 东财 secid：1.600000 / 0.000001
-            if (s.Length > 2 && s[1] == '.' && (s[0] == '0' || s[0] == '1'))
-            {
-                var p = s[0] == '1' ? "sh" : "sz";
-                s = p + s.Substring(2);
-            }
-
-            // 已带前缀
             if (s.Length >= 2)
             {
-                var p2 = s.Substring(0, 2);
-                if (string.Equals(p2, "sh", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(p2, "sz", StringComparison.OrdinalIgnoreCase))
-                {
-                    var rest = s.Substring(2).Trim();
-                    if (rest.All(char.IsDigit))
-                        return (p2.ToLowerInvariant() + rest);
-                    // 如果 rest 不是纯数字，放弃
-                    return null;
-                }
+                var p = s.Substring(0, 2);
+                if (p.Equals("sh", StringComparison.OrdinalIgnoreCase)) { prefix = "sh"; s = s.Substring(2); }
+                else if (p.Equals("sz", StringComparison.OrdinalIgnoreCase)) { prefix = "sz"; s = s.Substring(2); }
             }
 
-            // 纯数字：自动推断（指数请显式写 sh000001）
-            if (s.All(char.IsDigit))
+            // 兼容 1.600000 / 0.000001（东财 secid）
+            if (prefix == null && s.Length > 2 && s[1] == '.' && (s[0] == '0' || s[0] == '1'))
             {
-                if (s.StartsWith("6") || s.StartsWith("5") || s.StartsWith("9"))
-                    return "sh" + s;
-                return "sz" + s;
+                prefix = (s[0] == '1') ? "sh" : "sz";
+                s = s.Substring(2);
             }
 
-            return null;
+            s = s.Trim();
+            if (s.Length == 0) return "";
+
+            // 只取数字部分（防止用户输入带后缀）
+            var digits = new string(s.Where(char.IsDigit).ToArray());
+            if (string.IsNullOrWhiteSpace(digits)) return "";
+
+            if (prefix == null)
+            {
+                if (digits.StartsWith("6") || digits.StartsWith("5") || digits.StartsWith("9"))
+                    prefix = "sh";
+                else
+                    prefix = "sz";
+            }
+
+            return prefix + digits;
         }
 
         private static string ToSinaCode(string symbol)
         {
-            // _symbols 内已经是 canonical 了，这里再保险一下
             var s = NormalizeSymbol(symbol);
-            return s ?? "";
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            return s.ToLowerInvariant(); // sinajs 用小写 sh/sz
         }
 
         private void FireUpdated()
@@ -422,54 +426,47 @@ namespace cadstockv2
             try { DataUpdated?.Invoke(); } catch { }
         }
 
-        // ----------------- symbols 持久化（每行一个，支持 sh/sz 前缀） -----------------
-        private static string SymbolsFile =>
-            Path.Combine(Path.GetTempPath(), "cadstockv2_symbols.txt");
+        // ----------------- symbols 持久化（%TEMP%） -----------------
+        private static string SymbolsFile => Path.Combine(Path.GetTempPath(), "cadstockv2_symbols.txt");
 
-        private void LoadSymbolsFromDisk_NoLock(bool useDefaultsIfEmpty, bool saveIfDefaultInserted)
+        private void LoadSymbols(bool allowDefaultIfMissing)
         {
             try
             {
-                var tmp = new List<string>();
-
-                if (File.Exists(SymbolsFile))
-                {
-                    var lines = File.ReadAllLines(SymbolsFile, Encoding.UTF8);
-
-                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var line in lines)
-                    {
-                        var sym = NormalizeSymbol(line);
-                        if (string.IsNullOrWhiteSpace(sym)) continue;
-                        if (seen.Add(sym))
-                            tmp.Add(sym);
-                    }
-                }
-
-                if (tmp.Count == 0 && useDefaultsIfEmpty)
-                {
-                    // 默认给几个
-                    tmp.AddRange(new[] { "sh600000", "sz000001", "sh600519" });
-
-                    if (saveIfDefaultInserted)
-                    {
-                        _symbols.Clear();
-                        _symbols.AddRange(tmp);
-                        SaveSymbols_NoLock();
-                        return;
-                    }
-                }
+                var existed = File.Exists(SymbolsFile);
 
                 _symbols.Clear();
-                _symbols.AddRange(tmp);
+
+                if (existed)
+                {
+                    // ✅ 允许用户用逗号/空格/换行随便写
+                    var all = File.ReadAllText(SymbolsFile, Encoding.UTF8) ?? "";
+                    var tokens = all.Split(new[] { ',', '，', ';', '；', ' ', '\t', '\r', '\n' },
+                                           StringSplitOptions.RemoveEmptyEntries);
+
+                    foreach (var t0 in tokens)
+                    {
+                        var s = NormalizeSymbol(t0);
+                        if (string.IsNullOrWhiteSpace(s)) continue;
+                        if (!_symbols.Contains(s, StringComparer.OrdinalIgnoreCase))
+                            _symbols.Add(s);
+                    }
+
+                    // ✅ 注意：文件存在但为空 => 就保持为空（不再强行塞默认值）
+                    return;
+                }
+
+                // 文件不存在：第一次启动给默认值
+                if (allowDefaultIfMissing)
+                {
+                    _symbols.AddRange(new[] { "sh600000", "sz000001", "sh600519" });
+                    SaveSymbols();
+                }
             }
-            catch
-            {
-                // ignore
-            }
+            catch { }
         }
 
-        private void SaveSymbols_NoLock()
+        private void SaveSymbols()
         {
             try
             {
@@ -477,38 +474,25 @@ namespace cadstockv2
             }
             catch { }
         }
-
-        private void CleanupLatest_NoLock()
-        {
-            var keep = new HashSet<string>(_symbols, StringComparer.OrdinalIgnoreCase);
-            var keys = _latest.Keys.ToList();
-            foreach (var k in keys)
-            {
-                if (!keep.Contains(k))
-                    _latest.Remove(k);
-            }
-        }
     }
 
     internal sealed class StockQuote
     {
-        public string Symbol { get; set; }   // canonical: shxxxxxx / szxxxxxx
+        public string Symbol { get; set; }      // sh600000 / sz000001 / sh000001...
         public string Name { get; set; }
         public decimal Price { get; set; }
         public decimal PrevClose { get; set; }
 
-        // 显示用：去掉 sh/sz
+        // UI 用：不想显示前缀就用它
         public string SymbolShort
         {
             get
             {
-                if (string.IsNullOrWhiteSpace(Symbol)) return "";
-                if (Symbol.StartsWith("sh", StringComparison.OrdinalIgnoreCase) ||
-                    Symbol.StartsWith("sz", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Symbol.Length > 2 ? Symbol.Substring(2) : Symbol;
-                }
-                return Symbol;
+                var s = Symbol ?? "";
+                if (s.StartsWith("sh", StringComparison.OrdinalIgnoreCase) ||
+                    s.StartsWith("sz", StringComparison.OrdinalIgnoreCase))
+                    return s.Substring(2);
+                return s;
             }
         }
 
@@ -521,7 +505,6 @@ namespace cadstockv2
             }
         }
 
-        public override string ToString()
-            => $"{Symbol} {Name} {Price}";
+        public override string ToString() => $"{Symbol} {Name} {Price}";
     }
 }
