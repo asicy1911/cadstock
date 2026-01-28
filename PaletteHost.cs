@@ -39,7 +39,7 @@ namespace cadstockv2
         public static void ApplySymbols(string[] symbols)
         {
             StockQuoteService.Instance.SetSymbols(symbols);
-            _control?.SetSymbols(symbols);
+            _control?.SafeReloadFromService();
         }
 
         public static void NotifyQuotesUpdated()
